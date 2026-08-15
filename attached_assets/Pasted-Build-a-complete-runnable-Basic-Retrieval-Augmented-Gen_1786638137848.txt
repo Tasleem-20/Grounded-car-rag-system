@@ -1,0 +1,181 @@
+Build a complete, runnable Basic Retrieval-Augmented Generation (RAG) application in Python. This will be the foundation for a later research project called "Adaptive and Self-Checking RAG Framework for Reliable LLM Responses."
+
+IMPORTANT:
+
+* Generate the COMPLETE SOURCE CODE, not pseudocode.
+* Create all required files and folders.
+* The application must run locally.
+* Keep the code simple, modular, and easy to extend later.
+* Do not implement the adaptive/self-checking components yet.
+* Do not implement Query Analyzer, Relevance Checker, Evidence/Claim Checker, or Adaptive Re-Retrieval yet.
+* We will add those components later.
+
+TECHNOLOGY:
+
+* Python 3.11 or 3.12
+* OpenAI API for embeddings and LLM generation
+* FAISS for vector storage and similarity search
+* python-dotenv for environment variables
+* PyPDF2 or pypdf for PDF document loading
+* Streamlit for a simple user interface
+* NumPy
+* Do not use a paid vector database.
+* Do not hard-code any API key.
+
+FUNCTIONAL REQUIREMENTS:
+
+1. DOCUMENT UPLOAD
+   Create a Streamlit interface where the user can upload PDF and TXT documents.
+
+2. DOCUMENT PROCESSING
+
+* Extract text from uploaded PDF/TXT files.
+* Clean the extracted text.
+* Split the documents into meaningful chunks.
+* Use a reasonable chunk size and overlap.
+* Preserve document name and chunk metadata.
+
+3. EMBEDDINGS
+
+* Generate embeddings for document chunks using an OpenAI embedding model.
+* Store the embeddings in a FAISS vector index.
+* Save enough metadata so that retrieved chunks can be traced back to the original document.
+
+4. RETRIEVAL
+   When the user enters a question:
+
+* Generate an embedding for the question.
+* Search the FAISS index.
+* Retrieve the top-k most relevant chunks.
+* Make k configurable, with a sensible default such as 5.
+* Display the retrieved evidence/source chunks in the interface.
+
+5. GENERATION
+   Send the user question and retrieved context to an OpenAI LLM.
+   The prompt should instruct the LLM:
+
+* Answer using the retrieved context.
+* Do not invent information that is not supported by the context.
+* If the context is insufficient, clearly say that the available documents do not contain enough information.
+* Provide a concise answer.
+* Clearly separate the answer from the retrieved sources.
+
+6. SOURCE DISPLAY
+   For every answer, display:
+
+* Answer
+* Retrieved document names
+* Relevant retrieved text/chunks
+* Similarity/relevance scores if available
+
+7. USER INTERFACE
+   Create a simple Streamlit UI with:
+
+* Application title
+* PDF/TXT upload area
+* "Process Documents" button
+* Question input box
+* "Ask" button
+* Answer section
+* Retrieved evidence section
+* Source document information
+
+8. PROJECT STRUCTURE
+   Create a clean modular structure similar to:
+
+project/
+│
+├── app.py
+├── requirements.txt
+├── .env.example
+├── .gitignore
+├── README.md
+│
+├── data/
+│   └── documents/
+│
+├── src/
+│   ├── **init**.py
+│   ├── document_loader.py
+│   ├── chunker.py
+│   ├── embeddings.py
+│   ├── vector_store.py
+│   ├── retriever.py
+│   └── generator.py
+│
+└── indexes/
+
+You may modify the structure slightly if necessary, but keep document loading, chunking, embeddings, vector storage, retrieval, and generation as separate modules.
+
+9. ENVIRONMENT VARIABLES
+   Use a .env file containing:
+
+OPENAI_API_KEY=your_api_key_here
+
+Create a .env.example file but NEVER put a real API key inside it.
+
+10. REQUIREMENTS.TXT
+    Include all Python dependencies needed to run the project.
+
+11. README
+    Write clear instructions for:
+
+* Python version
+* Creating a virtual environment
+* Installing requirements
+* Creating .env
+* Adding OPENAI_API_KEY
+* Running the application
+* Uploading documents
+* Processing documents
+* Asking questions
+
+12. ERROR HANDLING
+    Handle:
+
+* Missing API key
+* No documents uploaded
+* Empty documents
+* No vector index
+* Empty user question
+* API errors
+* Invalid PDF files
+
+13. CODE QUALITY
+
+* Use functions/classes where appropriate.
+* Add comments explaining important sections.
+* Avoid unnecessary complexity.
+* Do not use hard-coded absolute file paths.
+* Make the project Windows-friendly.
+* Ensure imports work correctly.
+* Ensure the application can actually start with:
+
+streamlit run app.py
+
+14. TESTING
+    After creating the project:
+
+* Install the required packages.
+* Run the application.
+* Fix any import, dependency, or runtime errors you encounter.
+* Verify that a PDF can be uploaded and processed.
+* Verify that a question retrieves relevant chunks and generates an answer.
+
+FINAL REQUIREMENT:
+At the end, show me:
+
+1. The complete project file structure.
+2. The contents of every source file.
+3. The exact commands needed to install and run the application.
+4. Any API keys or environment variables that must be configured.
+
+Remember: this is ONLY the Basic RAG foundation. Keep the architecture modular because we will later add:
+
+* Query Analyzer
+* CAR-RAG category classification
+* category-aware retrieval
+* Relevance Checker
+* Evidence/Claim Checker
+* Adaptive Re-Retrieval
+* evaluation metrics

@@ -1,0 +1,1 @@
+- [Streamlit Preview startup](streamlit-workflow.md) — disable first-run onboarding and bind Streamlit to the workflow port so Preview can detect it.
