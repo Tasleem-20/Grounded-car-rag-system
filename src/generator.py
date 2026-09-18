@@ -1,10 +1,11 @@
 """Grounded answer generation using Groq."""
 
-import os
+from __future__ import annotations
 
 from dotenv import load_dotenv
-from groq import Groq
 
+from src.evidence import RetrievedEvidence
+from src.groq_models import TEXT_MODEL, format_groq_error, groq_client, strip_thinking
 from src.vector_store import RetrievedChunk
 
 load_dotenv()
@@ -14,79 +15,163 @@ class GenerationError(Exception):
     """Raised when a grounded answer cannot be generated."""
 
 
-SYSTEM_PROMPT = """You answer questions using only the provided retrieved context.
-Do not invent facts, citations, or details that are not supported by the context.
-If the context is insufficient, clearly say that the available documents do not
-contain enough information to answer the question.
-Keep the answer concise and directly address the question.
-Do not include a separate sources list; the application will display the retrieved
-evidence below your answer."""
+SYSTEM_PROMPT = """You are the answer-generation component of a CAR-RAG system.
+
+Answer the user's question using ONLY the retrieved evidence.
+
+Rules:
+- Do not use outside knowledge.
+- Do not invent facts.
+- Do not invent citations.
+- Do not add information that is not supported by the retrieved evidence.
+- If the evidence is insufficient, say so clearly.
+- Give a concise, direct answer.
+- Return the actual answer only.
+- Do not return reasoning or internal analysis.
+"""
 
 
 class Generator:
-    """Wrapper around Groq for grounded responses."""
+    """Generate grounded answers from retrieved text or image evidence."""
 
-    def __init__(self, model: str = "llama-3.3-70b-versatile") -> None:
-        api_key = os.getenv("GROQ_API_KEY")
+    def __init__(self, model: str | None = None, api_key: str | None = None) -> None:
+        try:
+            self.client = groq_client(api_key)
+        except RuntimeError as error:
+            raise GenerationError(str(error)) from error
 
-        if not api_key:
-            raise GenerationError(
-                "GROQ_API_KEY is not configured. Add it to .env."
-            )
+        self.model = model or TEXT_MODEL
 
-        self.client = Groq(api_key=api_key)
-        self.model = model
+    def answer(
+        self,
+        question: str,
+        results: list[RetrievedEvidence] | list[RetrievedChunk],
+    ) -> str:
 
-    def answer(self, question: str, results: list[RetrievedChunk]) -> str:
         if not question.strip():
-            raise GenerationError("The question cannot be empty.")
+            raise GenerationError(
+                "The question cannot be empty."
+            )
 
         if not results:
             return (
-                "The available documents do not contain enough information "
-                "to answer this question."
+                "The available documents do not contain enough "
+                "information to answer this question."
             )
 
+        # Normalize retrieved chunks into RetrievedEvidence.
+        evidence: list[RetrievedEvidence] = []
+
+        for result in results:
+            if isinstance(result, RetrievedEvidence):
+                evidence.append(result)
+            else:
+                evidence.append(result.to_evidence())
+
+        # If image evidence exists, try the multimodal vision pipeline first.
+        if any(item.modality == "image" for item in evidence):
+            try:
+                from src.vision import answer_with_images
+
+                answer = answer_with_images(
+                    question,
+                    evidence,
+                )
+
+                if answer and answer.strip():
+                    return strip_thinking(answer).strip()
+
+            except Exception:
+                # If the image file is missing or vision model fails, gracefully fall back
+                # to generating from the evidence blocks (which contain full OCR / captions).
+                pass
+
+        # Build grounded text context.
         context = "\n\n".join(
-            f"[Source {position}: {result.document_name}, "
-            f"chunk {result.chunk_index + 1}]\n"
-            f"{result.text}"
-            for position, result in enumerate(results, start=1)
+            item.evidence_block(position)
+            for position, item in enumerate(
+                evidence,
+                start=1,
+            )
         )
 
-        user_prompt = f"""Question:
+        user_prompt = f"""USER QUESTION:
 {question.strip()}
 
-Retrieved context:
+RETRIEVED EVIDENCE:
 {context}
 
-Write a concise answer grounded only in the retrieved context."""
+Using only the retrieved evidence above, answer the user's question.
+
+Return only the final answer."""
+
+        messages = [
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT,
+            },
+            {
+                "role": "user",
+                "content": user_prompt,
+            },
+        ]
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                temperature=0.2,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-            )
-
-            answer = response.choices[0].message.content
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=0.1,
+                    max_completion_tokens=700,
+                    reasoning_effort="none",
+                )
+            except Exception:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=0.1,
+                    max_completion_tokens=700,
+                )
 
         except Exception as error:
-            if "401" in str(error) or "authentication" in str(error).lower():
-                raise GenerationError(
-                    "Groq rejected the configured API credential. "
-                    "Check GROQ_API_KEY in .env."
-                ) from error
+            raise GenerationError(format_groq_error(error)) from error
 
+        try:
+            message = response.choices[0].message
+
+            answer = message.content
+
+            # Some Groq models may expose reasoning separately.
+            # We only want the final answer.
+            if not answer:
+                reasoning = getattr(
+                    message,
+                    "reasoning",
+                    None,
+                )
+
+                if reasoning:
+                    raise GenerationError(
+                        "The model returned reasoning but no final answer."
+                    )
+
+                raise GenerationError(
+                    "Groq returned an empty answer."
+                )
+
+            answer = strip_thinking(answer).strip()
+
+        except GenerationError:
+            raise
+
+        except Exception as error:
             raise GenerationError(
-                "Groq answer generation failed. Check your network, "
-                "model access, and API limits."
+                f"Could not read the Groq answer: {error}"
             ) from error
 
-        if not answer or not answer.strip():
-            raise GenerationError("Groq returned an empty answer.")
+        if not answer:
+            raise GenerationError(
+                "Groq returned an empty answer after processing."
+            )
 
-        return answer.strip()
+        return answer

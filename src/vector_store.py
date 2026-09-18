@@ -7,6 +7,7 @@ import faiss
 import numpy as np
 
 from src.chunker import TextChunk
+from src.evidence import RetrievedEvidence
 
 
 class VectorStoreError(Exception):
@@ -23,6 +24,25 @@ class RetrievedChunk:
         self.start_char = chunk.start_char
         self.end_char = chunk.end_char
         self.score = float(score)
+        self.modality = "text"
+        self.source_type = "text_chunk"
+        self.caption = None
+        self.image_id = None
+        self.image_path = None
+        self.page_number = None
+
+    def to_evidence(self) -> RetrievedEvidence:
+        return RetrievedEvidence(
+            modality="text",
+            document_name=self.document_name,
+            score=self.score,
+            text=self.text,
+            source_type=self.source_type,
+            chunk_index=self.chunk_index,
+            start_char=self.start_char,
+            end_char=self.end_char,
+            source_filename=self.document_name,
+        )
 
 
 class VectorStore:

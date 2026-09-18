@@ -63,6 +63,9 @@ def load_document(filename: str, content: bytes | None = None) -> LoadedDocument
         )
 
     if not text:
+        if extension == ".pdf":
+            # Scanned PDFs are handled by the image pipeline; keep text empty.
+            return LoadedDocument(name=path.name, text="")
         raise DocumentLoadError(
             f"{path.name} did not contain extractable text. "
             "Scanned PDFs need OCR before they can be indexed."

@@ -61,5 +61,8 @@ __pycache__/
 .env
 indexes/*.index
 indexes/metadata.json
+indexes/image_metadata.json
 data/documents/*
 !data/documents/.gitkeep
+data/images/*
+!data/images/.gitkeep

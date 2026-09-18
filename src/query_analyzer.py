@@ -14,6 +14,7 @@ class QueryAnalysis:
     query: str
     query_type: QueryType
     needs_more_retrieval: bool
+    needs_image_retrieval: bool = False
 
 
 class QueryAnalyzer:
@@ -39,6 +40,29 @@ class QueryAnalyzer:
             "both",
             "multiple",
         ]
+        visual_indicators = [
+            "image",
+            "picture",
+            "photo",
+            "diagram",
+            "figure",
+            "chart",
+            "logo",
+            "screenshot",
+            "visual",
+            "shown",
+            "looks like",
+            "color",
+            "icon",
+            "certificate",
+            "certification",
+            "signature",
+            "stamp",
+            "seal",
+            "person on",
+            "name of the person",
+            "shown on the",
+        ]
 
         question_lower = question.lower()
 
@@ -46,16 +70,22 @@ class QueryAnalyzer:
             indicator in question_lower
             for indicator in complex_indicators
         )
+        needs_image_retrieval = any(
+            indicator in question_lower
+            for indicator in visual_indicators
+        )
 
         if is_complex:
             return QueryAnalysis(
                 query=question,
                 query_type="complex",
                 needs_more_retrieval=True,
+                needs_image_retrieval=needs_image_retrieval,
             )
 
         return QueryAnalysis(
             query=question,
             query_type="simple",
             needs_more_retrieval=False,
+            needs_image_retrieval=needs_image_retrieval,
         )
