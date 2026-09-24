@@ -59,10 +59,18 @@ __pycache__/
 
 # Local secrets and generated RAG data
 .env
+.env.*
+!.env.example
+.streamlit/secrets.toml
 indexes/*.index
-indexes/metadata.json
-indexes/image_metadata.json
+indexes/*.json
+data/*.index
+data/*_metadata.json
+data/*.json
+data/diag_staging/
+data/images_staging/
 data/documents/*
 !data/documents/.gitkeep
 data/images/*
 !data/images/.gitkeep
+
