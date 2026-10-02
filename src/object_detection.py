@@ -15,7 +15,8 @@ except ImportError:
     YOLO = None
 
 
-DEFAULT_MODEL = "yolo26n.pt"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_MODEL = str(PROJECT_ROOT / "yolo26n.pt")
 
 
 class ObjectDetectionError(Exception):
@@ -125,15 +126,25 @@ class ObjectDetector:
                 "Add 'ultralytics' to requirements.txt."
             )
 
-        self.model_name = model_name
+        model_path = Path(model_name)
+        if not model_path.is_file():
+            cand = PROJECT_ROOT / model_path.name
+            if cand.is_file():
+                self.model_name = str(cand)
+            else:
+                raise ObjectDetectionError(
+                    f"YOLO model file not found: '{model_name}'. Please ensure yolo26n.pt exists in the repository root."
+                )
+        else:
+            self.model_name = str(model_path.resolve())
+
         self.confidence = confidence
 
         try:
-            self.model = YOLO(model_name)
+            self.model = YOLO(self.model_name)
         except Exception as error:
             raise ObjectDetectionError(
-                f"Could not load YOLO model "
-                f"'{model_name}': {error}"
+                f"Could not load YOLO model '{self.model_name}': {error}"
             ) from error
 
     def detect(

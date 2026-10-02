@@ -14,6 +14,9 @@ from src.evidence import RetrievedEvidence
 from src.vector_store import VectorStoreError
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+YOLO_MODEL_PATH = PROJECT_ROOT / "yolo26n.pt"
+
 IMAGE_METADATA_VERSION = 2
 
 
@@ -36,6 +39,7 @@ class ImageRecord:
     detection_summary: str = ""
     detection_counts: dict[str, int] = field(default_factory=dict)
     detection_context: str = ""
+    detection_error: str = ""
 
     def to_metadata(self) -> dict:
         return {
@@ -54,6 +58,7 @@ class ImageRecord:
             "detection_summary": self.detection_summary,
             "detection_counts": self.detection_counts,
             "detection_context": self.detection_context,
+            "detection_error": self.detection_error,
         }
 
     @classmethod
@@ -75,6 +80,7 @@ class ImageRecord:
             detection_summary=str(metadata.get("detection_summary", "")),
             detection_counts=dict(metadata.get("detection_counts", {})),
             detection_context=str(metadata.get("detection_context", "")),
+            detection_error=str(metadata.get("detection_error", "")),
         )
 
     def ensure_ocr(self) -> None:
@@ -84,6 +90,9 @@ class ImageRecord:
             if not path.is_file():
                 candidates = [
                     Path(self.image_path),
+                    PROJECT_ROOT / self.image_path,
+                    PROJECT_ROOT / "data" / "images" / path.name,
+                    PROJECT_ROOT / "data" / path.name,
                     Path("data") / "images" / path.name,
                     Path("data") / path.name,
                     Path("data") / "images_staging" / path.name,
@@ -98,16 +107,20 @@ class ImageRecord:
                 try:
                     from src.ocr import extract_ocr_text
                     self.ocr_text = extract_ocr_text(path)
-                except Exception:
-                    pass
+                except Exception as err:
+                    import logging
+                    logging.getLogger(__name__).warning("OCR failed on %s: %s", path, err)
 
     def ensure_detections(self) -> None:
         """If detections are not present but image file exists, run YOLO26n and populate."""
-        if not self.detections and not self.detection_context:
+        if not self.detections and not self.detection_context and not self.detection_error:
             path = Path(self.image_path)
             if not path.is_file():
                 candidates = [
                     Path(self.image_path),
+                    PROJECT_ROOT / self.image_path,
+                    PROJECT_ROOT / "data" / "images" / path.name,
+                    PROJECT_ROOT / "data" / path.name,
                     Path("data") / "images" / path.name,
                     Path("data") / path.name,
                     Path("data") / "images_staging" / path.name,
@@ -120,15 +133,22 @@ class ImageRecord:
 
             if path.is_file():
                 try:
+                    if not YOLO_MODEL_PATH.is_file():
+                        raise FileNotFoundError(
+                            f"YOLO model file not found at: {YOLO_MODEL_PATH}"
+                        )
                     from src.object_detection import ObjectDetector
-                    detector = ObjectDetector(model_name="yolo26n.pt")
+                    detector = ObjectDetector(model_name=str(YOLO_MODEL_PATH))
                     det_res = detector.detect(path)
                     self.detections = [d.to_dict() for d in det_res.detections]
                     self.detection_summary = det_res.summary
                     self.detection_counts = det_res.counts
                     self.detection_context = det_res.rag_context
-                except Exception:
-                    pass
+                    self.detection_error = ""
+                except Exception as det_err:
+                    self.detection_error = str(det_err)
+                    self.detection_summary = f"Detection unavailable: {det_err}"
+                    self.detection_context = f"OBJECT DETECTION ERROR\nCould not perform YOLO26n object detection: {det_err}"
 
     def to_evidence(self, score: float) -> RetrievedEvidence:
         self.ensure_ocr()
@@ -166,13 +186,21 @@ class ImageRecord:
                 "detection_summary": self.detection_summary,
                 "detection_counts": self.detection_counts,
                 "detection_context": self.detection_context,
+                "detection_error": self.detection_error,
             },
         )
 
     def to_detection_evidence(self, score: float = 1.0) -> RetrievedEvidence:
         self.ensure_detections()
-        text_context = self.detection_context
-        if not text_context:
+        if self.detection_error:
+            text_context = (
+                f"OBJECT DETECTION EVIDENCE (ERROR)\n"
+                f"Source: {self.document_name}\n"
+                f"Status: Detection failed ({self.detection_error})"
+            )
+        elif self.detection_context:
+            text_context = self.detection_context
+        else:
             if self.detections:
                 lines = ["OBJECT DETECTION EVIDENCE", self.detection_summary]
                 for idx, d in enumerate(self.detections, start=1):
@@ -208,6 +236,7 @@ class ImageRecord:
                 "detection_summary": self.detection_summary,
                 "detection_counts": self.detection_counts,
                 "detection_context": text_context,
+                "detection_error": self.detection_error,
             },
         )
 

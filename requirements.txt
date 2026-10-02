@@ -8,4 +8,6 @@ pypdf>=4.0.0
 pypdfium2>=4.30.0
 pillow>=10.0.0
 openai>=1.40.0
-ultralytics
+ultralytics
+rapidocr-onnxruntime
+

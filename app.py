@@ -941,9 +941,18 @@ def get_evidence_checker() -> EvidenceChecker:
     return EvidenceChecker(api_key=get_api_key())
 
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+YOLO_MODEL_PATH = PROJECT_ROOT / "yolo26n.pt"
+
+
 @st.cache_resource
 def get_object_detector() -> ObjectDetector:
-    return ObjectDetector(model_name="yolo26n.pt")
+    if not YOLO_MODEL_PATH.is_file():
+        raise FileNotFoundError(
+            f"YOLO model file not found at expected path: {YOLO_MODEL_PATH}. "
+            "Please ensure yolo26n.pt is in the project repository root."
+        )
+    return ObjectDetector(model_name=str(YOLO_MODEL_PATH))
 
 
 def optional_generator() -> Generator | None:
@@ -1137,16 +1146,20 @@ def process_uploads(uploaded_files) -> None:
 
                 # Extract OCR text for semantic image understanding
                 try:
-                    from src.ocr import extract_ocr_text
-                    ocr_text = extract_ocr_text(image_path)
+                    from src.ocr import extract_ocr_text, get_ocr_engine
+                    if get_ocr_engine() is None:
+                        st.warning(f"OCR engine is unavailable for {name}. Please ensure rapidocr-onnxruntime is installed.")
+                        ocr_text = ""
+                    else:
+                        ocr_text = extract_ocr_text(image_path)
                 except Exception as ocr_err:
                     ocr_text = ""
-                    if debug_enabled():
-                        st.caption(f"OCR extraction warning for {name}: {ocr_err}")
+                    st.warning(f"OCR extraction warning for {name}: {ocr_err}")
 
                 width, height = image_dimensions(image_path)
 
                 # Run YOLO26n object detection during document ingestion
+                det_error = ""
                 try:
                     detector = get_object_detector()
                     det_result = detector.detect(image_path=image_path)
@@ -1155,12 +1168,12 @@ def process_uploads(uploaded_files) -> None:
                     det_counts = det_result.counts
                     det_context = det_result.rag_context
                 except Exception as det_err:
+                    det_error = str(det_err)
                     det_list = []
-                    det_summary = ""
+                    det_summary = f"Detection unavailable: {det_err}"
                     det_counts = {}
-                    det_context = ""
-                    if debug_enabled():
-                        st.caption(f"YOLO26n detection warning for {name}: {det_err}")
+                    det_context = f"OBJECT DETECTION ERROR\nCould not perform YOLO26n object detection: {det_err}"
+                    st.warning(f"YOLO26n object detection error for {name}: {det_err}")
 
                 record = ImageRecord(
                     image_id=f"{normalize_source_name(name)}_{file_number}",
@@ -1178,6 +1191,7 @@ def process_uploads(uploaded_files) -> None:
                     detection_summary=det_summary,
                     detection_counts=det_counts,
                     detection_context=det_context,
+                    detection_error=det_error,
                 )
                 image_records.append(record)
 
@@ -1270,17 +1284,21 @@ def process_uploads(uploaded_files) -> None:
 
                     # Extract OCR text for semantic visual page understanding
                     try:
-                        from src.ocr import extract_ocr_text
-                        ocr_text = extract_ocr_text(image_path)
+                        from src.ocr import extract_ocr_text, get_ocr_engine
+                        if get_ocr_engine() is None:
+                            st.warning(f"OCR engine is unavailable for {name} (page {page_number}). Please ensure rapidocr-onnxruntime is installed.")
+                            ocr_text = ""
+                        else:
+                            ocr_text = extract_ocr_text(image_path)
                     except Exception as ocr_err:
                         ocr_text = ""
-                        if debug_enabled():
-                            st.caption(f"OCR extraction warning for {name} (page {page_number}): {ocr_err}")
+                        st.warning(f"OCR extraction warning for {name} (page {page_number}): {ocr_err}")
 
                     if not width or not height:
                         width, height = image_dimensions(image_path)
 
                     # Run YOLO26n object detection on PDF visual asset
+                    det_error = ""
                     try:
                         detector = get_object_detector()
                         det_result = detector.detect(image_path=image_path)
@@ -1289,12 +1307,12 @@ def process_uploads(uploaded_files) -> None:
                         det_counts = det_result.counts
                         det_context = det_result.rag_context
                     except Exception as det_err:
+                        det_error = str(det_err)
                         det_list = []
-                        det_summary = ""
+                        det_summary = f"Detection unavailable: {det_err}"
                         det_counts = {}
-                        det_context = ""
-                        if debug_enabled():
-                            st.caption(f"YOLO26n detection warning for {name} (page {page_number}): {det_err}")
+                        det_context = f"OBJECT DETECTION ERROR\nCould not perform YOLO26n object detection: {det_err}"
+                        st.warning(f"YOLO26n detection warning for {name} (page {page_number}): {det_err}")
 
                     record = ImageRecord(
                         image_id=(
@@ -1317,6 +1335,7 @@ def process_uploads(uploaded_files) -> None:
                         detection_summary=det_summary,
                         detection_counts=det_counts,
                         detection_context=det_context,
+                        detection_error=det_error,
                     )
                     image_records.append(record)
 

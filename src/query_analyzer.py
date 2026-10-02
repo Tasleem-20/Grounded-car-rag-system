@@ -93,14 +93,20 @@ class QueryAnalyzer:
         # C. Both visual and text cues
         elif is_vision_query and is_text_query:
             # Check if primarily visual request (e.g. "describe the visual design of this certificate")
-            if any(w in norm for w in ["visual design", "visual", "look like", "looks like", "color", "appearance", "design of", "describe the certificate", "describe the image", "describe the"]):
+            if any(w in norm for w in ["visual design", "looks like", "appearance", "design of", "describe the certificate", "describe the image"]):
                 mode = "IMAGE_RAG"
                 needs_image = True
                 needs_det = False
-            elif any(w in norm for w in ["compare", "both", "document and image", "text and image"]):
+            elif any(w in norm for w in ["compare", "both", "document and image", "text and image", "and what", "and how"]) or (
+                ("image" in norm or "picture" in norm or "photo" in norm)
+                and ("document" in norm or "pdf" in norm or "file" in norm or "text" in norm)
+            ):
                 mode = "MULTIMODAL_RAG"
                 needs_image = True
-                needs_det = False
+                has_obj_cue = any(
+                    w in norm for w in ["vehicle", "vehicles", "object", "objects", "car", "cars", "bus", "buses", "truck", "person", "detected", "visible"]
+                )
+                needs_det = has_obj_cue
             else:
                 # Text/factual query about a certificate/document
                 mode = "TEXT_RAG"
