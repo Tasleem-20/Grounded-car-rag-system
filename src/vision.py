@@ -231,6 +231,7 @@ Read the visible text in the images carefully.
 Pay particular attention to names, dates,
 certificate IDs, titles, organizations,
 numbers, and other exact values.
+If OBJECT DETECTION EVIDENCE is present in the retrieved evidence, use those exact detection counts and labels as authoritative ground truth for object and vehicle counts.
 
 If the evidence does not contain enough information,
 say so clearly.

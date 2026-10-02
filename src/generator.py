@@ -24,6 +24,7 @@ Rules:
 - Do not invent facts.
 - Do not invent citations.
 - Do not add information that is not supported by the retrieved evidence.
+- If OBJECT DETECTION EVIDENCE is provided, treat the detected object counts, categories, and bounding boxes as authoritative ground truth for questions asking about detected objects or counts.
 - If the evidence is insufficient, say so clearly.
 - Give a concise, direct answer.
 - Return the actual answer only.

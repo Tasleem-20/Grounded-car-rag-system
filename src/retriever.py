@@ -6,7 +6,7 @@ from src.embeddings import EmbeddingService
 from src.evidence import RetrievedEvidence
 from src.image_embeddings import ImageEmbeddingService
 from src.image_store import ImageStore
-from src.sources import filter_evidence_to_source
+from src.sources import filter_evidence_to_source, same_source_name
 from src.vector_store import RetrievedChunk, VectorStore
 
 
@@ -58,7 +58,9 @@ class MultimodalRetriever:
         mode: RetrievalMode = "both",
         prefer_images: bool = False,
         source_filter: str | None = None,
+        include_detection: bool = False,
     ) -> list[RetrievedEvidence]:
+        detection_results: list[RetrievedEvidence] = []
         text_results: list[RetrievedEvidence] = []
         image_results: list[RetrievedEvidence] = []
         text_fetch_k = top_k
@@ -70,6 +72,7 @@ class MultimodalRetriever:
             if self._index_size(self.image_store):
                 image_fetch_k = max(top_k, self._index_size(self.image_store))
 
+        # 1. Text Retrieval (Dense MiniLM FAISS)
         if mode in {"both", "text"} and self.text_store and self.text_embeddings:
             text_retriever = Retriever(self.text_store, self.text_embeddings)
             text_results = [
@@ -81,6 +84,7 @@ class MultimodalRetriever:
                     :top_k
                 ]
 
+        # 2. Image Retrieval (Dense CLIP FAISS)
         if mode in {"both", "image"} and self.image_store and self.image_embeddings:
             query_embedding = self.image_embeddings.embed_query(question)
             image_results = self.image_store.search(
@@ -91,6 +95,40 @@ class MultimodalRetriever:
                     :top_k
                 ]
 
-        if prefer_images:
+        # 3. Object Detection Evidence (YOLO26n Structured Metadata)
+        # ONLY retrieved when include_detection is True
+        if include_detection and self.image_store:
+            seen_image_ids = set()
+            for img_ev in image_results:
+                record = next(
+                    (r for r in self.image_store.records if r.image_id == img_ev.image_id),
+                    None,
+                )
+                if record and record.image_id not in seen_image_ids:
+                    if not source_filter or same_source_name(
+                        record.document_name, source_filter
+                    ):
+                        det_ev = record.to_detection_evidence(score=img_ev.score)
+                        if det_ev:
+                            detection_results.append(det_ev)
+                            seen_image_ids.add(record.image_id)
+
+            for record in self.image_store.records:
+                if record.image_id not in seen_image_ids:
+                    if not source_filter or same_source_name(
+                        record.document_name, source_filter
+                    ):
+                        det_ev = record.to_detection_evidence(score=0.90)
+                        if det_ev:
+                            detection_results.append(det_ev)
+                            seen_image_ids.add(record.image_id)
+
+        # Combine results preserving modality ordering
+        if prefer_images or mode == "image":
+            if detection_results:
+                return detection_results + image_results + text_results
             return image_results + text_results
+
+        if detection_results:
+            return text_results + detection_results + image_results
         return text_results + image_results

@@ -1,9 +1,12 @@
+"""CAR-RAG Builder: Multimodal document, text, and image retrieval application with integrated YOLO26n object detection."""
+
 from __future__ import annotations
 
 import io
 import json
 import os
 import shutil
+from collections import Counter
 from html import escape
 from pathlib import Path
 
@@ -12,10 +15,15 @@ from dotenv import load_dotenv
 from PIL import Image
 
 from src.answer_checker import AnswerChecker
-from src.car_rag import CARRAG
+from src.car_rag import CARRAG, CARRAGResult
 from src.chunker import TextChunk
 from src.config import Settings
+from src.deterministic_detection import (
+    answer_detection_query,
+    is_direct_object_detection_query,
+)
 from src.embeddings import EmbeddingService
+from src.evidence import RetrievedEvidence
 from src.evidence_checker import EvidenceChecker
 from src.generator import Generator
 from src.groq_models import GroqModelService, format_groq_error
@@ -29,6 +37,7 @@ from src.ingestion import (
     internal_loader_filename,
     load_document,
 )
+from src.object_detection import ObjectDetector
 from src.query_analyzer import QueryAnalyzer
 from src.retriever import MultimodalRetriever
 from src.sources import (
@@ -44,7 +53,6 @@ from src.vector_store import VectorStore
 
 load_dotenv()
 
-# Streamlit Page Setup
 st.set_page_config(
     page_title="CAR-RAG Builder",
     page_icon="⚡",
@@ -53,703 +61,707 @@ st.set_page_config(
 )
 
 
+# ==============================================================================
+# CSS & EXACT PIXEL-CLOSE STYLING
+# ==============================================================================
+
 def inject_css() -> None:
     st.markdown(
-        """
-        <link rel="preconnect" href="https://fonts.googleapis.com">
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet">
+        """<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
-        <style>
-            /* ==========================================================================
-               GLOBAL DESIGN SYSTEM TOKENS
-               ========================================================================== */
-            :root {
-                --bg-main: #090D16;
-                --bg-surface: #0F172A;
-                --bg-card: #141E33;
-                --bg-card-hover: #1A2744;
-                --bg-card-subtle: #111A2E;
-                --bg-sidebar: #0B1120;
-                
-                --border-subtle: #1E293B;
-                --border-card: #22304A;
-                --border-highlight: #33476B;
-                --border-accent: rgba(59, 130, 246, 0.4);
-                
-                --primary: #3B82F6;
-                --primary-gradient: linear-gradient(135deg, #3B82F6 0%, #2563EB 100%);
-                --primary-glow: rgba(59, 130, 246, 0.18);
-                --cyan-accent: #06B6D4;
-                --emerald-accent: #10B981;
-                --amber-accent: #F59E0B;
-                --rose-accent: #F43F5E;
-                --indigo-accent: #6366F1;
-                
-                --text-main: #F8FAFC;
-                --text-muted: #94A3B8;
-                --text-dim: #64748B;
-                --text-bright: #FFFFFF;
-                
-                --radius-sm: 6px;
-                --radius-md: 10px;
-                --radius-lg: 14px;
-                --radius-xl: 18px;
-                --radius-full: 9999px;
-                
-                --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-                --font-heading: 'Plus Jakarta Sans', var(--font-sans);
-                --font-mono: 'JetBrains Mono', monospace;
-            }
+*, *::before, *::after {
+    box-sizing: border-box !important;
+}
 
-            /* Global Typography & Background */
-            html, body, [class*="css"], .stApp {
-                font-family: var(--font-sans);
-                background-color: var(--bg-main) !important;
-                color: var(--text-main) !important;
-                letter-spacing: -0.01em;
-            }
+/* Global resets & fixed canvas background */
+html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"], [data-testid="stMain"], section.main {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+    background-color: #070e1c !important;
+    color: #f8fafc !important;
+    -webkit-font-smoothing: antialiased;
+    max-width: 100vw !important;
+}
 
-            /* Scrollbar styling */
-            ::-webkit-scrollbar {
-                width: 6px;
-                height: 6px;
-            }
-            ::-webkit-scrollbar-track {
-                background: var(--bg-main);
-            }
-            ::-webkit-scrollbar-thumb {
-                background: #1E293B;
-                border-radius: var(--radius-full);
-            }
-            ::-webkit-scrollbar-thumb:hover {
-                background: #334155;
-            }
+/* Hide visible scrollbars globally on main view while preserving mouse/touch/keyboard scrolling */
+html,
+body,
+[data-testid="stAppViewContainer"],
+[data-testid="stApp"],
+[data-testid="stMain"],
+section.main,
+.main,
+.block-container {
+    scrollbar-width: none !important;
+    -ms-overflow-style: none !important;
+}
 
-            /* Top Streamlit bar styling */
-            [data-testid="stHeader"] {
-                background: transparent !important;
-            }
+html::-webkit-scrollbar,
+body::-webkit-scrollbar,
+[data-testid="stAppViewContainer"]::-webkit-scrollbar,
+[data-testid="stApp"]::-webkit-scrollbar,
+[data-testid="stMain"]::-webkit-scrollbar,
+section.main::-webkit-scrollbar,
+.main::-webkit-scrollbar,
+.block-container::-webkit-scrollbar {
+    display: none !important;
+    width: 0px !important;
+    height: 0px !important;
+}
 
-            .block-container {
-                padding-top: 1.5rem !important;
-                padding-bottom: 3.5rem !important;
-                max-width: 1200px !important;
-            }
+[data-testid="stAppViewContainer"] {
+    background-color: #070e1c !important;
+}
 
-            /* Headers */
-            h1, h2, h3, h4, h5, h6 {
-                font-family: var(--font-heading) !important;
-                font-weight: 700 !important;
-                color: var(--text-bright) !important;
-                letter-spacing: -0.02em !important;
-            }
-            h1 { font-size: 1.95rem !important; margin-bottom: 0.25rem !important; }
-            h2 { font-size: 1.35rem !important; margin-top: 1.25rem !important; margin-bottom: 0.75rem !important; }
-            h3 { font-size: 1.1rem !important; margin-top: 1rem !important; }
+/* Hide default Streamlit header bar & collapse button to prevent layout shifts */
+header[data-testid="stHeader"], [data-testid="stHeader"] {
+    display: none !important;
+    height: 0px !important;
+    min-height: 0px !important;
+}
 
-            /* ==========================================================================
-               SIDEBAR STYLING
-               ========================================================================== */
-            [data-testid="stSidebar"] {
-                background: var(--bg-sidebar) !important;
-                border-right: 1px solid var(--border-card) !important;
-                padding-top: 0.5rem !important;
-            }
-            [data-testid="stSidebar"] > div:first-child {
-                padding-left: 1rem !important;
-                padding-right: 1rem !important;
-                padding-top: 1rem !important;
-            }
-            
-            /* Sidebar Brand Header */
-            .sidebar-brand {
-                display: flex;
-                align-items: center;
-                gap: 0.75rem;
-                padding: 0.6rem 0.6rem 1.1rem 0.6rem;
-                margin-bottom: 0.75rem;
-                border-bottom: 1px solid var(--border-subtle);
-            }
-            .sidebar-brand-icon {
-                width: 36px;
-                height: 36px;
-                background: linear-gradient(135deg, #1E40AF 0%, #3B82F6 100%);
-                border: 1px solid rgba(96, 165, 250, 0.4);
-                border-radius: var(--radius-md);
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                font-size: 1.1rem;
-                box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);
-            }
-            .sidebar-brand-text {
-                display: flex;
-                flex-direction: column;
-            }
-            .sidebar-brand-title {
-                font-family: var(--font-heading);
-                font-weight: 700;
-                font-size: 1.05rem;
-                color: var(--text-bright);
-                letter-spacing: -0.02em;
-                line-height: 1.2;
-            }
-            .sidebar-brand-subtitle {
-                font-size: 0.72rem;
-                color: var(--text-muted);
-                font-weight: 400;
-                letter-spacing: 0.01em;
-            }
+[data-testid="stSidebarCollapseButton"],
+[data-testid="collapsedControl"],
+button[data-testid="baseButton-header"],
+#MainMenu, footer {
+    visibility: hidden !important;
+    display: none !important;
+}
 
-            /* Sidebar Section Labels */
-            .sidebar-nav-header {
-                font-size: 0.68rem;
-                font-weight: 700;
-                letter-spacing: 0.08em;
-                text-transform: uppercase;
-                color: var(--text-dim);
-                margin-top: 1rem;
-                margin-bottom: 0.4rem;
-                padding-left: 0.5rem;
-            }
+/* 25% FIXED SIDEBAR (width: 25vw; min: 260px, max: 320px; height: 100vh; no border-right) */
+section[data-testid="stSidebar"],
+[data-testid="stSidebar"] {
+    width: 25vw !important;
+    min-width: 260px !important;
+    max-width: 320px !important;
+    height: 100vh !important;
+    flex-shrink: 0 !important;
+    background-color: #0b152d !important;
+    border-right: none !important;
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    bottom: 0 !important;
+    z-index: 9999 !important;
+    overflow-y: auto !important;
+    scrollbar-width: none !important;
+    -ms-overflow-style: none !important;
+    box-sizing: border-box !important;
+}
 
-            /* Sidebar Navigation Buttons */
-            [data-testid="stSidebar"] .stButton > button {
-                width: 100% !important;
-                text-align: left !important;
-                justify-content: flex-start !important;
-                padding: 0.55rem 0.85rem !important;
-                font-size: 0.88rem !important;
-                font-weight: 500 !important;
-                border-radius: var(--radius-md) !important;
-                transition: all 0.18s ease-in-out !important;
-                margin-bottom: 0.2rem !important;
-                border: 1px solid transparent !important;
-                background: transparent !important;
-                color: var(--text-muted) !important;
-            }
-            [data-testid="stSidebar"] .stButton > button:hover {
-                background: rgba(30, 41, 59, 0.6) !important;
-                color: var(--text-main) !important;
-                border-color: var(--border-subtle) !important;
-                transform: translateX(2px);
-            }
-            [data-testid="stSidebar"] .stButton > button[kind="primary"] {
-                background: rgba(37, 99, 235, 0.14) !important;
-                color: #60A5FA !important;
-                border: 1px solid rgba(59, 130, 246, 0.35) !important;
-                font-weight: 600 !important;
-                box-shadow: 0 2px 8px rgba(37, 99, 235, 0.12);
-            }
+/* Hide visible scrollbars on sidebar */
+section[data-testid="stSidebar"]::-webkit-scrollbar,
+[data-testid="stSidebar"]::-webkit-scrollbar,
+[data-testid="stSidebar"] > div::-webkit-scrollbar,
+[data-testid="stSidebarContent"]::-webkit-scrollbar,
+[data-testid="stSidebarUserContent"]::-webkit-scrollbar {
+    display: none !important;
+    width: 0px !important;
+    height: 0px !important;
+}
 
-            /* Sidebar Footer */
-            .sidebar-footer {
-                margin-top: 1.5rem;
-                padding: 0.85rem;
-                background: var(--bg-surface);
-                border: 1px solid var(--border-subtle);
-                border-radius: var(--radius-lg);
-            }
-            .sidebar-status-pill {
-                display: inline-flex;
-                align-items: center;
-                gap: 0.45rem;
-                font-size: 0.8rem;
-                font-weight: 600;
-                color: #34D399;
-                margin-bottom: 0.35rem;
-            }
-            .status-dot {
-                width: 7px;
-                height: 7px;
-                border-radius: var(--radius-full);
-                background-color: #10B981;
-                box-shadow: 0 0 8px #10B981;
-                display: inline-block;
-            }
-            .status-dot-amber {
-                background-color: #F59E0B;
-                box-shadow: 0 0 8px #F59E0B;
-            }
-            .sidebar-footer-stat {
-                font-size: 0.75rem;
-                color: var(--text-muted);
-                display: flex;
-                justify-content: space-between;
-                margin-top: 0.25rem;
-            }
+[data-testid="stSidebarContent"],
+[data-testid="stSidebarUserContent"] {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+    padding: 1.5rem 20px !important;
+    overflow-y: auto !important;
+    box-sizing: border-box !important;
+    scrollbar-width: none !important;
+    -ms-overflow-style: none !important;
+}
 
-            /* ==========================================================================
-               PAGE HEADER COMPONENT
-               ========================================================================== */
-            .page-header {
-                margin-bottom: 1.5rem;
-                padding-bottom: 0.85rem;
-                border-bottom: 1px solid var(--border-subtle);
-            }
-            .page-badge {
-                display: inline-flex;
-                align-items: center;
-                gap: 0.35rem;
-                font-size: 0.72rem;
-                font-weight: 600;
-                text-transform: uppercase;
-                letter-spacing: 0.06em;
-                color: #60A5FA;
-                background: rgba(37, 99, 235, 0.12);
-                border: 1px solid rgba(59, 130, 246, 0.25);
-                padding: 0.2rem 0.6rem;
-                border-radius: var(--radius-full);
-                margin-bottom: 0.45rem;
-            }
-            .page-title {
-                font-size: 1.75rem;
-                font-weight: 800;
-                color: var(--text-bright);
-                letter-spacing: -0.025em;
-                line-height: 1.2;
-                margin: 0;
-            }
-            .page-subtitle {
-                font-size: 0.92rem;
-                color: var(--text-muted);
-                margin-top: 0.35rem;
-                margin-bottom: 0;
-                line-height: 1.45;
-            }
+[data-testid="stSidebar"] [data-testid="stVerticalBlock"] {
+    gap: 0.35rem !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+}
 
-            /* ==========================================================================
-               CARDS & METRICS
-               ========================================================================== */
-            div[data-testid="stMetric"] {
-                background: var(--bg-card) !important;
-                border: 1px solid var(--border-card) !important;
-                border-radius: var(--radius-lg) !important;
-                padding: 0.85rem 1.1rem !important;
-                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25) !important;
-                transition: all 0.2s ease !important;
-            }
-            div[data-testid="stMetric"]:hover {
-                border-color: var(--border-highlight) !important;
-                background: var(--bg-card-hover) !important;
-                transform: translateY(-1px);
-            }
-            [data-testid="stMetricLabel"] p {
-                font-size: 0.78rem !important;
-                font-weight: 600 !important;
-                text-transform: uppercase !important;
-                letter-spacing: 0.05em !important;
-                color: var(--text-muted) !important;
-            }
-            [data-testid="stMetricValue"] {
-                font-family: var(--font-heading) !important;
-                font-size: 1.6rem !important;
-                font-weight: 700 !important;
-                color: var(--text-bright) !important;
-            }
+/* 75% MAIN CONTENT CONTAINER (starts strictly AFTER 25vw sidebar) */
+section.main,
+[data-testid="stMain"],
+.stMain,
+[data-testid="stAppViewContainer"] > section:nth-of-type(2) {
+    margin-left: 25vw !important;
+    width: 75vw !important;
+    max-width: 75vw !important;
+    min-height: 100vh !important;
+    background-color: #070e1c !important;
+    box-sizing: border-box !important;
+    position: relative !important;
+    left: 0 !important;
+}
 
-            /* Custom UI Cards */
-            .ui-card {
-                background: var(--bg-card);
-                border: 1px solid var(--border-card);
-                border-radius: var(--radius-lg);
-                padding: 1.25rem;
-                margin-bottom: 1rem;
-                box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
-            }
-            .ui-card-header {
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                margin-bottom: 0.85rem;
-                padding-bottom: 0.65rem;
-                border-bottom: 1px solid var(--border-subtle);
-            }
-            .ui-card-title {
-                font-size: 0.98rem;
-                font-weight: 700;
-                color: var(--text-bright);
-                display: flex;
-                align-items: center;
-                gap: 0.5rem;
-            }
+@media (max-width: 1040px) {
+    section[data-testid="stSidebar"], [data-testid="stSidebar"] {
+        width: 260px !important;
+    }
+    section.main, [data-testid="stMain"], .stMain {
+        margin-left: 260px !important;
+        width: calc(100% - 260px) !important;
+        max-width: calc(100% - 260px) !important;
+    }
+}
 
-            /* Document / File Row Item */
-            .file-card {
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                gap: 1rem;
-                padding: 0.85rem 1.1rem;
-                margin-bottom: 0.6rem;
-                background: var(--bg-card-subtle);
-                border: 1px solid var(--border-card);
-                border-radius: var(--radius-md);
-                transition: all 0.18s ease;
-            }
-            .file-card:hover {
-                background: var(--bg-card);
-                border-color: var(--border-highlight);
-            }
-            .file-info {
-                display: flex;
-                align-items: center;
-                gap: 0.85rem;
-                min-width: 0;
-            }
-            .file-icon {
-                width: 38px;
-                height: 38px;
-                border-radius: var(--radius-md);
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                font-size: 1.15rem;
-                flex-shrink: 0;
-            }
-            .file-icon-pdf {
-                background: rgba(239, 68, 68, 0.15);
-                border: 1px solid rgba(239, 68, 68, 0.3);
-                color: #F87171;
-            }
-            .file-icon-img {
-                background: rgba(147, 51, 234, 0.15);
-                border: 1px solid rgba(147, 51, 234, 0.3);
-                color: #C084FC;
-            }
-            .file-icon-txt {
-                background: rgba(59, 130, 246, 0.15);
-                border: 1px solid rgba(59, 130, 246, 0.3);
-                color: #60A5FA;
-            }
-            .file-name-text {
-                font-weight: 600;
-                font-size: 0.92rem;
-                color: var(--text-bright);
-                white-space: nowrap;
-                overflow: hidden;
-                text-overflow: ellipsis;
-            }
-            .file-subtext {
-                font-size: 0.74rem;
-                color: var(--text-muted);
-                margin-top: 0.15rem;
-            }
-            .file-badges {
-                display: flex;
-                align-items: center;
-                gap: 0.5rem;
-                flex-shrink: 0;
-            }
+@media (min-width: 1280px) {
+    section[data-testid="stSidebar"], [data-testid="stSidebar"] {
+        width: 320px !important;
+    }
+    section.main, [data-testid="stMain"], .stMain {
+        margin-left: 320px !important;
+        width: calc(100% - 320px) !important;
+        max-width: calc(100% - 320px) !important;
+    }
+}
 
-            /* Badges & Tags */
-            .badge {
-                font-size: 0.72rem;
-                font-weight: 600;
-                letter-spacing: 0.04em;
-                padding: 0.25rem 0.65rem;
-                border-radius: var(--radius-full);
-                display: inline-flex;
-                align-items: center;
-                gap: 0.35rem;
-            }
-            .badge-blue {
-                background: rgba(59, 130, 246, 0.14);
-                border: 1px solid rgba(59, 130, 246, 0.3);
-                color: #93C5FD;
-            }
-            .badge-emerald {
-                background: rgba(16, 185, 129, 0.14);
-                border: 1px solid rgba(16, 185, 129, 0.3);
-                color: #6EE7B7;
-            }
-            .badge-purple {
-                background: rgba(168, 85, 247, 0.14);
-                border: 1px solid rgba(168, 85, 247, 0.3);
-                color: #D8B4FE;
-            }
-            .badge-amber {
-                background: rgba(245, 158, 11, 0.14);
-                border: 1px solid rgba(245, 158, 11, 0.3);
-                color: #FCD34D;
-            }
+/* Main Content inside 75% area: 50px left/right padding */
+.block-container,
+[data-testid="stMainBlockContainer"] {
+    padding-top: 1.8rem !important;
+    padding-bottom: 3.5rem !important;
+    padding-left: 50px !important;
+    padding-right: 50px !important;
+    max-width: 100% !important;
+    width: 100% !important;
+    margin-left: 0 !important;
+    margin-right: auto !important;
+    box-sizing: border-box !important;
+    overflow-x: hidden !important;
+}
 
-            /* Status Card Component */
-            .status-card {
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                padding: 0.95rem 1.15rem;
-                background: var(--bg-card);
-                border: 1px solid var(--border-card);
-                border-radius: var(--radius-lg);
-                margin-bottom: 0.65rem;
-            }
-            .status-card-left {
-                display: flex;
-                align-items: center;
-                gap: 0.85rem;
-            }
-            .status-card-title {
-                font-weight: 600;
-                font-size: 0.9rem;
-                color: var(--text-bright);
-            }
-            .status-card-subtitle {
-                font-size: 0.75rem;
-                color: var(--text-muted);
-            }
+/* Brand area */
+.app-brand-container {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 1.25rem;
+    width: 100% !important;
+    max-width: 100% !important;
+    overflow: hidden !important;
+}
 
-            /* ==========================================================================
-               RAG CHAT & ANSWER WORKSPACE
-               ========================================================================== */
-            .answer-card {
-                background: linear-gradient(180deg, #16223B 0%, #10192C 100%);
-                border: 1px solid rgba(59, 130, 246, 0.35);
-                border-radius: var(--radius-xl);
-                padding: 1.5rem;
-                margin-top: 1rem;
-                margin-bottom: 1.25rem;
-                box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3), 0 0 16px rgba(37, 99, 235, 0.08);
-            }
-            .answer-card-header {
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                margin-bottom: 1rem;
-                padding-bottom: 0.75rem;
-                border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-            }
-            .answer-card-title {
-                font-family: var(--font-heading);
-                font-size: 1.05rem;
-                font-weight: 700;
-                color: var(--text-bright);
-                display: flex;
-                align-items: center;
-                gap: 0.5rem;
-            }
-            .answer-body {
-                font-size: 1rem;
-                line-height: 1.65;
-                color: #E2E8F0;
-                letter-spacing: -0.005em;
-            }
+.app-brand-icon {
+    background: linear-gradient(135deg, #2563eb, #1d4ed8);
+    color: #ffffff;
+    border-radius: 8px;
+    width: 38px;
+    height: 38px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.15rem;
+    font-weight: 700;
+    box-shadow: 0 2px 10px rgba(37, 99, 235, 0.4);
+    flex-shrink: 0;
+}
 
-            /* Evidence Items */
-            .evidence-card {
-                background: var(--bg-card);
-                border: 1px solid var(--border-card);
-                border-radius: var(--radius-md);
-                padding: 1rem;
-                margin-bottom: 0.75rem;
-                transition: border-color 0.18s ease;
-            }
-            .evidence-card:hover {
-                border-color: var(--border-highlight);
-            }
-            .evidence-header {
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                margin-bottom: 0.6rem;
-            }
-            .evidence-source {
-                font-weight: 600;
-                font-size: 0.86rem;
-                color: var(--text-bright);
-                display: flex;
-                align-items: center;
-                gap: 0.45rem;
-            }
-            .evidence-score {
-                font-family: var(--font-mono);
-                font-size: 0.75rem;
-                font-weight: 600;
-                color: #60A5FA;
-                background: rgba(37, 99, 235, 0.12);
-                padding: 0.2rem 0.55rem;
-                border-radius: var(--radius-sm);
-                border: 1px solid rgba(59, 130, 246, 0.25);
-            }
-            .evidence-snippet {
-                font-family: var(--font-sans);
-                font-size: 0.85rem;
-                line-height: 1.55;
-                color: #CBD5E1;
-                background: rgba(15, 23, 42, 0.6);
-                border: 1px solid rgba(255, 255, 255, 0.05);
-                border-radius: var(--radius-sm);
-                padding: 0.75rem 0.95rem;
-            }
+.app-brand-title {
+    font-size: 1.08rem;
+    font-weight: 700;
+    color: #ffffff;
+    letter-spacing: -0.01em;
+    line-height: 1.2;
+    white-space: nowrap !important;
+}
 
-            /* Architecture Diagram Container */
-            .arch-pipeline {
-                background: var(--bg-card);
-                border: 1px solid var(--border-card);
-                border-radius: var(--radius-xl);
-                padding: 1.5rem;
-                margin-bottom: 1.5rem;
-            }
-            .arch-grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-                gap: 1rem;
-                margin-top: 1rem;
-            }
-            .arch-box {
-                background: var(--bg-card-subtle);
-                border: 1px solid var(--border-card);
-                border-radius: var(--radius-lg);
-                padding: 1.1rem;
-                transition: all 0.2s ease;
-            }
-            .arch-box:hover {
-                border-color: rgba(59, 130, 246, 0.4);
-                background: var(--bg-card);
-                transform: translateY(-2px);
-            }
-            .arch-box-icon {
-                font-size: 1.4rem;
-                margin-bottom: 0.5rem;
-            }
-            .arch-box-title {
-                font-weight: 700;
-                font-size: 0.95rem;
-                color: var(--text-bright);
-                margin-bottom: 0.35rem;
-            }
-            .arch-box-desc {
-                font-size: 0.82rem;
-                color: var(--text-muted);
-                line-height: 1.45;
-            }
+.app-brand-caption {
+    font-size: 0.74rem;
+    color: #7c8ba1;
+    line-height: 1.25;
+    margin-top: 0.15rem;
+}
 
-            /* ==========================================================================
-               INPUTS, BUTTONS & FORM CONTROLS
-               ========================================================================== */
-            .stTextArea textarea, .stTextInput input, .stSelectbox select {
-                background-color: var(--bg-card-subtle) !important;
-                border: 1px solid var(--border-card) !important;
-                border-radius: var(--radius-md) !important;
-                color: var(--text-bright) !important;
-                font-size: 0.92rem !important;
-                transition: all 0.2s ease !important;
-            }
-            .stTextArea textarea:focus, .stTextInput input:focus {
-                border-color: #3B82F6 !important;
-                box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2) !important;
-                background-color: var(--bg-surface) !important;
-            }
+.nav-section-label {
+    font-size: 0.68rem;
+    font-weight: 700;
+    color: #475569;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    margin-top: 1.25rem;
+    margin-bottom: 0.4rem;
+    padding-left: 0.1rem;
+}
 
-            /* Primary Action Buttons */
-            .stButton > button[kind="primary"] {
-                background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%) !important;
-                color: #FFFFFF !important;
-                border: 1px solid rgba(96, 165, 250, 0.4) !important;
-                font-weight: 600 !important;
-                border-radius: var(--radius-md) !important;
-                padding: 0.6rem 1.25rem !important;
-                box-shadow: 0 4px 14px rgba(37, 99, 235, 0.3) !important;
-                transition: all 0.2s ease !important;
-            }
-            .stButton > button[kind="primary"]:hover {
-                background: linear-gradient(135deg, #3B82F6 0%, #2563EB 100%) !important;
-                box-shadow: 0 6px 20px rgba(37, 99, 235, 0.45) !important;
-                transform: translateY(-1px);
-            }
+/* Sidebar navigation buttons: width ≈ 270–285px, height ≈ 40–42px */
+[data-testid="stSidebar"] div.stButton {
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+}
 
-            /* Secondary Action Buttons */
-            .stButton > button[kind="secondary"] {
-                background: var(--bg-card-subtle) !important;
-                border: 1px solid var(--border-card) !important;
-                color: var(--text-main) !important;
-                border-radius: var(--radius-md) !important;
-                font-weight: 500 !important;
-                transition: all 0.18s ease !important;
-            }
-            .stButton > button[kind="secondary"]:hover {
-                background: var(--bg-card-hover) !important;
-                border-color: var(--border-highlight) !important;
-            }
+[data-testid="stSidebar"] div.stButton > button {
+    background-color: #0b1120 !important;
+    border: 1px solid #141e30 !important;
+    border-radius: 8px !important;
+    color: #94a3b8 !important;
+    font-weight: 500 !important;
+    font-size: 0.92rem !important;
+    height: 42px !important;
+    min-height: 42px !important;
+    max-height: 42px !important;
+    padding: 0 0.85rem !important;
+    text-align: left !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: flex-start !important;
+    transition: all 0.15s ease-in-out !important;
+    box-shadow: none !important;
+    margin-bottom: 0.25rem !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+    overflow: hidden !important;
+}
 
-            /* File Uploader Container */
-            [data-testid="stFileUploader"] {
-                background: var(--bg-card-subtle) !important;
-                border: 1px dashed var(--border-highlight) !important;
-                border-radius: var(--radius-lg) !important;
-                padding: 1.25rem !important;
-                transition: all 0.2s ease !important;
-            }
-            [data-testid="stFileUploader"]:hover {
-                border-color: #3B82F6 !important;
-                background: rgba(15, 23, 42, 0.8) !important;
-            }
+[data-testid="stSidebar"] div.stButton > button p,
+[data-testid="stSidebar"] div.stButton > button div[data-testid="stMarkdownContainer"] p {
+    font-size: 0.92rem !important;
+    font-weight: 500 !important;
+    margin: 0 !important;
+    color: #94a3b8 !important;
+    text-align: left !important;
+    width: 100% !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+}
 
-            /* Tabs Styling */
-            div[data-baseweb="tab-list"] {
-                gap: 0.5rem !important;
-                background-color: transparent !important;
-                border-bottom: 1px solid var(--border-subtle) !important;
-                margin-bottom: 1rem !important;
-            }
-            div[data-baseweb="tab"] {
-                border-radius: var(--radius-md) var(--radius-md) 0 0 !important;
-                background-color: transparent !important;
-                color: var(--text-muted) !important;
-                font-weight: 600 !important;
-                font-size: 0.88rem !important;
-                padding: 0.6rem 1.1rem !important;
-                border: none !important;
-            }
-            div[data-baseweb="tab"][aria-selected="true"] {
-                color: #60A5FA !important;
-                border-bottom: 2px solid #3B82F6 !important;
-                background: rgba(37, 99, 235, 0.08) !important;
-            }
+[data-testid="stSidebar"] div.stButton > button:hover {
+    border-color: #2563eb !important;
+    background-color: #101c36 !important;
+}
 
-            /* Expanders */
-            .streamlit-expanderHeader {
-                background: var(--bg-card) !important;
-                border: 1px solid var(--border-card) !important;
-                border-radius: var(--radius-md) !important;
-                color: var(--text-main) !important;
-                font-weight: 600 !important;
-                font-size: 0.9rem !important;
-            }
-            .streamlit-expanderContent {
-                background: var(--bg-card-subtle) !important;
-                border: 1px solid var(--border-card) !important;
-                border-top: none !important;
-                border-radius: 0 0 var(--radius-md) var(--radius-md) !important;
-                padding: 1rem !important;
-            }
+[data-testid="stSidebar"] div.stButton > button:hover p {
+    color: #ffffff !important;
+}
 
-            /* Alerts & Notifications */
-            div[data-testid="stAlert"] {
-                border-radius: var(--radius-md) !important;
-                border: 1px solid var(--border-card) !important;
-                background: var(--bg-card) !important;
-            }
+/* Active Sidebar button: Bright Blue style */
+[data-testid="stSidebar"] div.stButton > button[kind="primary"],
+[data-testid="stSidebar"] div.stButton > button[data-testid="baseButton-primary"] {
+    background: linear-gradient(135deg, #1d4ed8, #2563eb) !important;
+    border: 1px solid #3b82f6 !important;
+    color: #ffffff !important;
+    font-weight: 600 !important;
+    font-size: 0.92rem !important;
+    height: 42px !important;
+    min-height: 42px !important;
+    max-height: 42px !important;
+    padding: 0 0.85rem !important;
+    box-shadow: 0 2px 10px rgba(37, 99, 235, 0.4) !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+    border-radius: 8px !important;
+}
 
-            /* Utility classes */
-            .muted { color: var(--text-muted) !important; font-size: 0.88rem !important; }
-            .mono { font-family: var(--font-mono) !important; }
-            .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.85rem; }
-            @media (max-width: 768px) {
-                .grid-2 { grid-template-columns: 1fr; }
-            }
-        </style>
-        """,
+[data-testid="stSidebar"] div.stButton > button[kind="primary"] p,
+[data-testid="stSidebar"] div.stButton > button[data-testid="baseButton-primary"] p,
+[data-testid="stSidebar"] div.stButton > button[kind="primary"] div[data-testid="stMarkdownContainer"] p,
+[data-testid="stSidebar"] div.stButton > button[data-testid="baseButton-primary"] div[data-testid="stMarkdownContainer"] p {
+    color: #ffffff !important;
+    font-weight: 600 !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+}
+
+.sidebar-footer {
+    margin-top: 2.2rem;
+    padding-top: 0.85rem;
+    border-top: 1px solid #131c2e;
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+    overflow: hidden !important;
+}
+
+.sidebar-status-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: #10b981;
+}
+
+/* Main typography & headers */
+.badge-pill {
+    display: inline-block;
+    background: #0c1e3d;
+    color: #38bdf8;
+    border: 1px solid #1e40af;
+    border-radius: 999px;
+    padding: 0.22rem 0.75rem;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 0.4rem;
+}
+
+h1 {
+    font-size: 2.25rem !important;
+    font-weight: 700 !important;
+    color: #ffffff !important;
+    letter-spacing: -0.015em !important;
+    margin-top: 0 !important;
+    margin-bottom: 0.35rem !important;
+    line-height: 1.2 !important;
+}
+
+h2, h3, .stSubheader {
+    font-size: 1.3rem !important;
+    font-weight: 650 !important;
+    color: #ffffff !important;
+    letter-spacing: -0.005em !important;
+    margin-top: 1.6rem !important;
+    margin-bottom: 0.75rem !important;
+}
+
+.page-subtitle {
+    font-size: 0.95rem;
+    color: #7c8ba1;
+    margin-bottom: 0.85rem;
+    line-height: 1.45;
+}
+
+hr.dashboard-divider {
+    border: none !important;
+    border-top: 1px solid #131c2e !important;
+    margin: 0.85rem 0 1.5rem 0 !important;
+}
+
+.format-caption {
+    font-size: 0.85rem;
+    color: #94a3b8;
+    margin-top: -0.5rem;
+    margin-bottom: 1.15rem;
+    line-height: 1.45;
+}
+
+.format-caption strong {
+    color: #f1f5f9;
+}
+
+/* 4 Metric Cards in one row across 75% width */
+div[data-testid="stMetric"] {
+    background: #0b1325 !important;
+    border: 1px solid #162238 !important;
+    border-radius: 12px !important;
+    padding: 1.15rem 1.35rem !important;
+    min-height: 98px !important;
+    width: 100% !important;
+    display: flex !important;
+    flex-direction: column !important;
+    justify-content: center !important;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25) !important;
+    transition: border-color 0.2s ease !important;
+}
+
+div[data-testid="stMetric"]:hover {
+    border-color: #2563eb !important;
+}
+
+div[data-testid="stMetric"] label,
+div[data-testid="stMetric"] [data-testid="stMetricLabel"] {
+    font-size: 0.72rem !important;
+    font-weight: 700 !important;
+    color: #64748b !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.08em !important;
+    margin-bottom: 0.35rem !important;
+}
+
+div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+    font-size: 1.85rem !important;
+    font-weight: 700 !important;
+    color: #ffffff !important;
+    line-height: 1.15 !important;
+}
+
+/* Active Dataset Banner: Full width */
+.info-banner {
+    background: #0d1e3d;
+    border: 1px solid #1e3a6d;
+    border-radius: 10px;
+    padding: 1.1rem 1.35rem;
+    color: #60a5fa;
+    font-size: 0.94rem;
+    font-weight: 500;
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0.5rem 0 1.25rem 0;
+    line-height: 1.45;
+    box-sizing: border-box;
+}
+
+/* System Status Cards: 2-column layout filling available width */
+.status-card {
+    background: #0b1325;
+    border: 1px solid #162238;
+    border-radius: 12px;
+    padding: 1.1rem 1.35rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.85rem;
+    width: 100% !important;
+    max-width: 100% !important;
+    transition: border-color 0.2s ease;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
+    box-sizing: border-box;
+}
+
+.status-card:hover {
+    border-color: #2563eb;
+}
+
+.status-card-left {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.status-dot-indicator {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.status-dot-indicator.green {
+    background: #10b981;
+    box-shadow: 0 0 8px rgba(16, 185, 129, 0.7);
+}
+
+.status-dot-indicator.amber {
+    background: #f59e0b;
+    box-shadow: 0 0 8px rgba(245, 158, 11, 0.7);
+}
+
+.status-card-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #f8fafc;
+    margin-bottom: 0.18rem;
+}
+
+.status-card-desc {
+    font-size: 0.8rem;
+    color: #64748b;
+}
+
+.status-badge {
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 0.24rem 0.65rem;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+.status-badge.connected,
+.status-badge.ready,
+.status-badge.active {
+    background: #06251b;
+    color: #34d399;
+    border: 1px solid #065f46;
+}
+
+.status-badge.unavailable,
+.status-badge.nodata,
+.status-badge.missing {
+    background: #25180c;
+    color: #f59e0b;
+    border: 1px solid #78350f;
+}
+
+/* File Row */
+.file-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.85rem 1.15rem;
+    margin-bottom: 0.5rem;
+    background: #0b1325;
+    border: 1px solid #162238;
+    border-radius: 10px;
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box;
+    transition: border-color 0.2s ease;
+}
+
+.file-row:hover {
+    border-color: #2563eb;
+}
+
+.file-name { font-weight: 600; color: #f8fafc; font-size: 0.92rem; }
+.file-type {
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    color: #cbd5e1;
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 999px;
+    padding: 0.2rem 0.65rem;
+}
+
+/* Architecture Pipeline */
+.arch-pipeline-container {
+    background: #0b1325;
+    border: 1px solid #162238;
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 1.25rem;
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box;
+}
+
+.arch-pipeline-header {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: #ffffff;
+    margin-bottom: 0.35rem;
+}
+
+.arch-pipeline-desc {
+    font-size: 0.86rem;
+    color: #94a3b8;
+    line-height: 1.45;
+    margin-bottom: 1.25rem;
+}
+
+.arch-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1rem;
+}
+
+@media (max-width: 850px) {
+    .arch-grid {
+        grid-template-columns: repeat(1, 1fr);
+    }
+}
+
+.arch-card {
+    background: #070d1a;
+    border: 1px solid #141f33;
+    border-radius: 10px;
+    padding: 1.15rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    transition: border-color 0.2s ease;
+}
+
+.arch-card:hover {
+    border-color: #2563eb;
+}
+
+.arch-card-icon {
+    font-size: 1.3rem;
+    margin-bottom: 0.1rem;
+}
+
+.arch-card-title {
+    font-size: 0.92rem;
+    font-weight: 700;
+    color: #f8fafc;
+}
+
+.arch-card-body {
+    font-size: 0.79rem;
+    color: #94a3b8;
+    line-height: 1.45;
+}
+
+.arch-decision-box {
+    background: #0d1e3d;
+    border: 1px solid #1e3a6d;
+    border-radius: 10px;
+    padding: 1.1rem 1.35rem;
+    color: #60a5fa;
+    font-size: 0.88rem;
+    line-height: 1.5;
+    margin-top: 1.25rem;
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box;
+}
+
+/* Primary Action Buttons across all pages */
+div.stButton > button[kind="primary"],
+div.stButton > button[data-testid="baseButton-primary"] {
+    background: linear-gradient(135deg, #2563eb, #1d4ed8) !important;
+    border: 1px solid #3b82f6 !important;
+    color: #ffffff !important;
+    font-weight: 600 !important;
+    border-radius: 8px !important;
+    padding: 0.6rem 1.2rem !important;
+    box-shadow: 0 2px 10px rgba(37, 99, 235, 0.35) !important;
+    transition: all 0.15s ease !important;
+}
+
+div.stButton > button[kind="primary"]:hover,
+div.stButton > button[data-testid="baseButton-primary"]:hover {
+    background: linear-gradient(135deg, #3b82f6, #2563eb) !important;
+    box-shadow: 0 4px 14px rgba(37, 99, 235, 0.5) !important;
+}
+
+/* Textarea and Inputs */
+div[data-baseweb="textarea"] {
+    background-color: #0b1325 !important;
+    border: 1px solid #162238 !important;
+    border-radius: 10px !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box;
+}
+
+div[data-baseweb="textarea"] textarea {
+    color: #f8fafc !important;
+    font-size: 0.95rem !important;
+}
+
+div[data-baseweb="select"] > div {
+    background-color: #0b1325 !important;
+    border: 1px solid #162238 !important;
+    border-radius: 10px !important;
+    color: #f8fafc !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box;
+}
+
+div[data-testid="stFileUploader"] section {
+    background: #0b1325 !important;
+    border: 1px dashed #1e3357 !important;
+    border-radius: 10px !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box;
+}
+
+hr {
+    border-color: #131c2e !important;
+    margin: 1.5rem 0 !important;
+}
+</style>""",
         unsafe_allow_html=True,
     )
 
 
 inject_css()
 
+
 # ==============================================================================
-# STATE & DATASET MANAGEMENT
+# STATE MANAGEMENT
 # ==============================================================================
 
 DEFAULT_DATASET = {
@@ -809,6 +821,7 @@ if "active_dataset" not in st.session_state:
 
 
 def detect_uploaded_file_type(uploaded_file, content: bytes) -> str:
+    """Detect the actual file type instead of trusting only the filename."""
     return detect_file_type(
         safe_filename(getattr(uploaded_file, "name", "")),
         content,
@@ -850,90 +863,39 @@ def show_error(message: str, error: Exception | None = None) -> None:
         st.caption(str(error))
 
 
-# ==============================================================================
-# UI HELPER RENDERING FUNCTIONS
-# ==============================================================================
-
-def render_page_header(badge: str, title: str, subtitle: str) -> None:
+def render_file_row(name: str, file_type: str, prefix: str = "") -> None:
+    label = f"{prefix}{name}" if prefix else name
     st.markdown(
-        f"""
-        <div class="page-header">
-            <div class="page-badge">{escape(badge)}</div>
-            <h1 class="page-title">{escape(title)}</h1>
-            <p class="page-subtitle">{escape(subtitle)}</p>
-        </div>
-        """,
+        f'<div class="file-row"><span class="file-name">{escape(label)}</span>'
+        f'<span class="file-type">{escape(file_type)}</span></div>',
         unsafe_allow_html=True,
     )
 
 
-def render_file_card(name: str, file_type: str, modality: str = "", is_staged: bool = False) -> None:
-    ft = file_type.upper()
-    if ft == "PDF":
-        icon_class = "file-icon-pdf"
-        icon_char = "📄"
-        type_badge = '<span class="badge badge-purple">PDF DOCUMENT</span>'
-    elif ft in {"PNG", "JPG", "JPEG", "WEBP"}:
-        icon_class = "file-icon-img"
-        icon_char = "🖼️"
-        type_badge = '<span class="badge badge-blue">IMAGE MODALITY</span>'
-    else:
-        icon_class = "file-icon-txt"
-        icon_char = "📝"
-        type_badge = '<span class="badge badge-emerald">TEXT SOURCE</span>'
-
-    status_badge = (
-        '<span class="badge badge-amber">● Staged</span>'
-        if is_staged
-        else '<span class="badge badge-emerald">● Indexed</span>'
-    )
-
-    st.markdown(
-        f"""
-        <div class="file-card">
-            <div class="file-info">
-                <div class="file-icon {icon_class}">{icon_char}</div>
-                <div>
-                    <div class="file-name-text">{escape(name)}</div>
-                    <div class="file-subtext">{ft} Format · Internal Multimodal Unit</div>
-                </div>
-            </div>
-            <div class="file-badges">
-                {type_badge}
-                {status_badge}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+OBJECT_EMOJIS = {
+    "car": "🚗",
+    "truck": "🚚",
+    "bus": "🚌",
+    "motorcycle": "🏍️",
+    "bicycle": "🚲",
+    "person": "🧍",
+    "traffic light": "🚦",
+    "stop sign": "🛑",
+    "dog": "🐕",
+    "cat": "🐈",
+    "backpack": "🎒",
+    "chair": "🪑",
+    "cell phone": "📱",
+    "laptop": "💻",
+}
 
 
-def render_status_row(title: str, subtitle: str, is_ready: bool, ready_label: str = "Ready", unready_label: str = "Offline") -> None:
-    dot_class = "status-dot" if is_ready else "status-dot status-dot-amber"
-    badge_class = "badge-emerald" if is_ready else "badge-amber"
-    label_text = ready_label if is_ready else unready_label
-
-    st.markdown(
-        f"""
-        <div class="status-card">
-            <div class="status-card-left">
-                <span class="{dot_class}"></span>
-                <div>
-                    <div class="status-card-title">{escape(title)}</div>
-                    <div class="status-card-subtitle">{escape(subtitle)}</div>
-                </div>
-            </div>
-            <div>
-                <span class="badge {badge_class}">{escape(label_text)}</span>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+def get_object_emoji(label: str) -> str:
+    return OBJECT_EMOJIS.get(label.lower().strip(), "🎯")
 
 
 # ==============================================================================
-# MODEL & PIPELINE SERVICES
+# CACHED SERVICES & DETECTOR
 # ==============================================================================
 
 @st.cache_resource
@@ -979,6 +941,11 @@ def get_evidence_checker() -> EvidenceChecker:
     return EvidenceChecker(api_key=get_api_key())
 
 
+@st.cache_resource
+def get_object_detector() -> ObjectDetector:
+    return ObjectDetector(model_name="yolo26n.pt")
+
+
 def optional_generator() -> Generator | None:
     if not get_api_key():
         return None
@@ -996,6 +963,10 @@ def optional_evidence_checker() -> EvidenceChecker | None:
         return None
     return get_evidence_checker()
 
+
+# ==============================================================================
+# INDEX PATHS & STORES
+# ==============================================================================
 
 def get_text_index_path() -> Path:
     return get_data_dir() / "text.index"
@@ -1066,6 +1037,7 @@ def caption_visual(
     source_name: str,
     page_number: int | None = None,
 ) -> tuple[str, str | None]:
+    """Caption an image. Failures become warnings, not upload failures."""
     from src.vision import fallback_caption
 
     groq_service = get_groq_service()
@@ -1077,7 +1049,6 @@ def caption_visual(
 
     try:
         from src.vision import caption_image as vision_caption
-
         return vision_caption(image_path, source_name=source_name), None
     except Exception as error:
         return fallback_caption(source_name, page_number), format_groq_error(error)
@@ -1090,6 +1061,10 @@ def image_dimensions(image_path: Path) -> tuple[int, int]:
     except Exception:
         return 0, 0
 
+
+# ==============================================================================
+# DATASET INGESTION
+# ==============================================================================
 
 def process_uploads(uploaded_files) -> None:
     if not uploaded_files:
@@ -1130,7 +1105,7 @@ def process_uploads(uploaded_files) -> None:
         return
 
     total_files = len(prepared_files)
-    final_images_dir = get_data_dir() / "images"
+    final_images_dir = get_images_dir()
 
     try:
         staging_dir = get_images_staging_dir()
@@ -1160,7 +1135,33 @@ def process_uploads(uploaded_files) -> None:
                 if warning:
                     caption_warnings.append(f"{name}: {warning}")
 
+                # Extract OCR text for semantic image understanding
+                try:
+                    from src.ocr import extract_ocr_text
+                    ocr_text = extract_ocr_text(image_path)
+                except Exception as ocr_err:
+                    ocr_text = ""
+                    if debug_enabled():
+                        st.caption(f"OCR extraction warning for {name}: {ocr_err}")
+
                 width, height = image_dimensions(image_path)
+
+                # Run YOLO26n object detection during document ingestion
+                try:
+                    detector = get_object_detector()
+                    det_result = detector.detect(image_path=image_path)
+                    det_list = [d.to_dict() for d in det_result.detections]
+                    det_summary = det_result.summary
+                    det_counts = det_result.counts
+                    det_context = det_result.rag_context
+                except Exception as det_err:
+                    det_list = []
+                    det_summary = ""
+                    det_counts = {}
+                    det_context = ""
+                    if debug_enabled():
+                        st.caption(f"YOLO26n detection warning for {name}: {det_err}")
+
                 record = ImageRecord(
                     image_id=f"{normalize_source_name(name)}_{file_number}",
                     modality="image",
@@ -1169,9 +1170,14 @@ def process_uploads(uploaded_files) -> None:
                     image_path=str(final_images_dir / image_path.name),
                     page_number=None,
                     caption=caption,
+                    ocr_text=ocr_text,
                     source_type="standalone_image",
                     width=width,
                     height=height,
+                    detections=det_list,
+                    detection_summary=det_summary,
+                    detection_counts=det_counts,
+                    detection_context=det_context,
                 )
                 image_records.append(record)
 
@@ -1262,8 +1268,33 @@ def process_uploads(uploaded_files) -> None:
                             f"{name} (page {page_label}): {warning}"
                         )
 
+                    # Extract OCR text for semantic visual page understanding
+                    try:
+                        from src.ocr import extract_ocr_text
+                        ocr_text = extract_ocr_text(image_path)
+                    except Exception as ocr_err:
+                        ocr_text = ""
+                        if debug_enabled():
+                            st.caption(f"OCR extraction warning for {name} (page {page_number}): {ocr_err}")
+
                     if not width or not height:
                         width, height = image_dimensions(image_path)
+
+                    # Run YOLO26n object detection on PDF visual asset
+                    try:
+                        detector = get_object_detector()
+                        det_result = detector.detect(image_path=image_path)
+                        det_list = [d.to_dict() for d in det_result.detections]
+                        det_summary = det_result.summary
+                        det_counts = det_result.counts
+                        det_context = det_result.rag_context
+                    except Exception as det_err:
+                        det_list = []
+                        det_summary = ""
+                        det_counts = {}
+                        det_context = ""
+                        if debug_enabled():
+                            st.caption(f"YOLO26n detection warning for {name} (page {page_number}): {det_err}")
 
                     record = ImageRecord(
                         image_id=(
@@ -1278,9 +1309,14 @@ def process_uploads(uploaded_files) -> None:
                             int(page_number) if page_number is not None else None
                         ),
                         caption=caption,
+                        ocr_text=ocr_text,
                         source_type="pdf_visual",
                         width=width,
                         height=height,
+                        detections=det_list,
+                        detection_summary=det_summary,
+                        detection_counts=det_counts,
+                        detection_context=det_context,
                     )
                     image_records.append(record)
 
@@ -1299,7 +1335,7 @@ def process_uploads(uploaded_files) -> None:
 
             progress.progress(file_number / total_files)
 
-        status.write("Building FAISS multimodal indexes...")
+        status.write("Building search indexes...")
 
         if text_chunks:
             embeddings = embedding_service.embed_texts(
@@ -1373,11 +1409,19 @@ def process_uploads(uploaded_files) -> None:
     st.success(f"Active dataset updated successfully with {len(active_files)} file(s).")
 
     unique_warnings = list(dict.fromkeys(caption_warnings))
-    for warning in unique_warnings[:6]:
-        st.warning(warning)
-    if len(unique_warnings) > 6:
-        st.caption(f"{len(unique_warnings) - 6} additional captioning warning(s) omitted.")
+    if unique_warnings:
+        rate_limits = [w for w in unique_warnings if "rate limit" in w.lower()]
+        other_warnings = [w for w in unique_warnings if "rate limit" not in w.lower()]
+        for warning in other_warnings[:4]:
+            st.warning(warning)
+        if rate_limits and debug_enabled():
+            for w in rate_limits[:3]:
+                st.caption(f"Note: {w}")
 
+
+# ==============================================================================
+# RETRIEVAL & CAR-RAG PIPELINE
+# ==============================================================================
 
 def retrieval_mode_for_source(selected_source: str | None, search_all: bool) -> str:
     text_store = load_text_store()
@@ -1391,11 +1435,13 @@ def retrieval_mode_for_source(selected_source: str | None, search_all: bool) -> 
     )
 
 
-def run_car_rag(
+def run_car_rag_pipeline(
     question: str,
     selected_source: str | None = None,
     search_all: bool = False,
-):
+    extra_evidence: list[RetrievedEvidence] | None = None,
+) -> CARRAGResult:
+    """Execute the CAR-RAG pipeline combining indexed documents and any extra evidence."""
     text_store = load_text_store()
     image_store = load_image_store()
     analyzer = get_query_analyzer()
@@ -1403,6 +1449,10 @@ def run_car_rag(
 
     retrieval_mode = retrieval_mode_for_source(selected_source, search_all)
     prefer_images = analysis.needs_image_retrieval or retrieval_mode == "image"
+    include_detection = (
+        analysis.needs_detection_evidence
+        or analysis.query_mode in {"OBJECT_DETECTION", "MULTIMODAL_RAG"}
+    )
     source_filter = None if search_all else selected_source
 
     retriever = MultimodalRetriever(
@@ -1414,13 +1464,33 @@ def run_car_rag(
 
     top_k = int(st.session_state.settings.get("top_k", 5))
 
-    evidence = retriever.retrieve(
-        question=question,
-        top_k=top_k,
-        mode=retrieval_mode,
-        prefer_images=prefer_images,
-        source_filter=source_filter,
-    )
+    mode_to_use = retrieval_mode
+    if retrieval_mode == "both":
+        if analysis.query_mode == "TEXT_RAG":
+            mode_to_use = "text"
+        elif analysis.query_mode in {"IMAGE_RAG", "OBJECT_DETECTION"}:
+            mode_to_use = "image"
+        else:
+            mode_to_use = "both"
+
+    retrieved_items: list[RetrievedEvidence] = []
+    if text_store is not None or image_store is not None:
+        retrieved_items = list(
+            retriever.retrieve(
+                question=question,
+                top_k=top_k,
+                mode=mode_to_use,
+                prefer_images=prefer_images,
+                source_filter=source_filter,
+                include_detection=include_detection,
+            )
+        )
+
+    # Prepend any extra evidence
+    combined_evidence: list[RetrievedEvidence] = []
+    if extra_evidence:
+        combined_evidence.extend(extra_evidence)
+    combined_evidence.extend(retrieved_items)
 
     rag = CARRAG(
         analyzer=analyzer,
@@ -1433,7 +1503,7 @@ def run_car_rag(
 
     result = rag.run(
         question=question,
-        initial_evidence=evidence,
+        initial_evidence=combined_evidence,
         query_analysis=analysis,
         source_filter=source_filter,
         retrieval_mode=retrieval_mode,
@@ -1441,296 +1511,327 @@ def run_car_rag(
         prefer_images=prefer_images,
     )
 
-    if source_filter and hasattr(result, "evidence"):
-        result.evidence = filter_evidence_to_source(result.evidence, source_filter)
+    if source_filter and hasattr(result, "evidence") and result.evidence:
+        allowed_evidence = []
+        for ev in result.evidence:
+            if ev.source_type == "object_detection" or same_source_name(ev.document_name, source_filter):
+                allowed_evidence.append(ev)
+        result.evidence = allowed_evidence
 
     return result
 
 
 # ==============================================================================
-# SIDEBAR NAVIGATION
+# SIDEBAR NAVIGATION (MATCHING SCREENSHOT)
 # ==============================================================================
 
 NAV_SECTIONS = [
-    {
-        "header": "MAIN",
-        "items": [
+    (
+        "MAIN",
+        [
             ("Dashboard", "📊"),
             ("Documents", "📁"),
             ("Ask RAG", "⚡"),
         ],
-    },
-    {
-        "header": "ANALYSIS",
-        "items": [
-            ("Evidence", "📑"),
-            ("Architecture", "🏗️"),
+    ),
+    (
+        "ANALYSIS",
+        [
+            ("Evidence", "📄"),
+            ("Architecture", "🏗"),
             ("Status", "🟢"),
         ],
-    },
-    {
-        "header": "SYSTEM",
-        "items": [
-            ("Settings", "⚙️"),
+    ),
+    (
+        "SYSTEM",
+        [
+            ("Settings", "⚙"),
         ],
-    },
+    ),
 ]
 
 with st.sidebar:
-    # Top Branding
     st.markdown(
-        """
-        <div class="sidebar-brand">
-            <div class="sidebar-brand-icon">⚡</div>
-            <div class="sidebar-brand-text">
-                <span class="sidebar-brand-title">CAR-RAG Builder</span>
-                <span class="sidebar-brand-subtitle">Certificate-aware multimodal retrieval</span>
-            </div>
-        </div>
-        """,
+        """<div class="app-brand-container">
+    <div class="app-brand-icon">⚡</div>
+    <div>
+        <div class="app-brand-title">CAR-RAG Builder</div>
+        <div class="app-brand-caption">Multimodal AI Retrieval System</div>
+    </div>
+</div>""",
         unsafe_allow_html=True,
     )
 
-    # Navigation Groups
-    for section in NAV_SECTIONS:
-        st.markdown(f'<div class="sidebar-nav-header">{section["header"]}</div>', unsafe_allow_html=True)
-        for page_name, icon in section["items"]:
-            is_active = st.session_state.page == page_name
-            btn_label = f"{icon}  {page_name}"
+    for section_label, items in NAV_SECTIONS:
+        st.markdown(f'<div class="nav-section-label">{section_label}</div>', unsafe_allow_html=True)
+        for page_name, icon in items:
+            is_active = (st.session_state.page == page_name)
             if st.button(
-                btn_label,
+                f"{icon}  {page_name}",
+                key=f"nav_{page_name}",
                 use_container_width=True,
                 type="primary" if is_active else "secondary",
-                key=f"nav_{page_name}",
             ):
                 st.session_state.page = page_name
                 st.rerun()
 
-    # Footer Card
-    active_files = st.session_state.active_dataset.get("files", [])
-    groq_ready = bool(get_api_key())
-    
     st.markdown(
-        f"""
-        <div class="sidebar-footer">
-            <div class="sidebar-status-pill">
-                <span class="status-dot"></span>
-                <span>CAR-RAG Ready</span>
-            </div>
-            <div class="sidebar-footer-stat">
-                <span>Active Files</span>
-                <strong style="color: #F8FAFC;">{len(active_files)}</strong>
-            </div>
-            <div class="sidebar-footer-stat">
-                <span>LLM Engine</span>
-                <strong style="color: {'#34D399' if groq_ready else '#F59E0B'};">{'Groq Online' if groq_ready else 'Unset'}</strong>
-            </div>
-        </div>
-        """,
+        """<div class="sidebar-footer">
+    <div class="sidebar-status-row">🟢 CAR-RAG Ready</div>
+</div>""",
         unsafe_allow_html=True,
     )
 
 
 # ==============================================================================
-# PAGE 1: DASHBOARD
+# PAGE 1: DASHBOARD (EXACT PIXEL-MATCH TO SCREENSHOT)
 # ==============================================================================
 
 if st.session_state.page == "Dashboard":
-    render_page_header(
-        badge="System Overview",
-        title="Dashboard",
-        subtitle="Real-time multimodal indexing, vector store diagnostics, and active dataset status.",
+    st.markdown('<div class="badge-pill">SYSTEM OVERVIEW</div>', unsafe_allow_html=True)
+    st.markdown("<h1>Dashboard</h1>", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="page-subtitle">Real-time multimodal indexing, vector store diagnostics, and active dataset status.</div>',
+        unsafe_allow_html=True,
     )
+    st.markdown('<hr class="dashboard-divider" />', unsafe_allow_html=True)
 
     text_store = load_text_store()
     image_store = load_image_store()
     active_files = st.session_state.active_dataset.get("files", [])
 
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("ACTIVE FILES", len(active_files))
     searchable_items = 0
     if text_store:
         searchable_items += text_store.index.ntotal
     if image_store:
         searchable_items += image_store.index.ntotal
+    col2.metric("SEARCHABLE ITEMS", searchable_items)
+    col3.metric("EMBEDDINGS", "MiniLM + CLIP")
+    col4.metric("LLM ENGINE", "Groq")
 
-    # High Level Metrics Row
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Active Files", len(active_files))
-    m2.metric("Searchable Items", searchable_items)
-    m3.metric("Embeddings", "MiniLM + CLIP")
-    m4.metric("LLM Engine", "Groq")
-
-    # Active Dataset Section
-    st.markdown("### Active Dataset")
+    st.markdown("<h2>Active Dataset</h2>", unsafe_allow_html=True)
     if not active_files:
-        st.info("No active dataset loaded. Please navigate to Documents to upload source files.")
+        st.markdown(
+            '<div class="info-banner">No active dataset loaded. Please navigate to Documents to upload source files.</div>',
+            unsafe_allow_html=True,
+        )
     else:
         for file_info in active_files:
-            render_file_card(
-                name=file_info["name"],
-                file_type=file_info["type"],
-                modality=file_info.get("modality", "text"),
-                is_staged=False,
-            )
+            render_file_row(file_info["name"], file_info["type"])
 
-    # System Status Section
-    st.markdown("### System Status")
-    left, right = st.columns(2)
-    with left:
-        render_status_row(
-            title="Text Retrieval Index",
-            subtitle=f"{text_store.index.ntotal} FAISS chunks ready" if text_store else "Index offline",
-            is_ready=text_store is not None,
-            ready_label="Ready",
-            unready_label="Unavailable",
+    st.markdown("<h2>System Status</h2>", unsafe_allow_html=True)
+    left_col, right_col = st.columns(2)
+
+    with left_col:
+        # Card 1: Text Retrieval Index
+        t_online = text_store is not None
+        t_title = "Text Retrieval Index"
+        t_desc = f"Dense Text FAISS ready ({text_store.index.ntotal} chunks)" if t_online else "Index offline"
+        t_dot = "green" if t_online else "amber"
+        t_badge_class = "ready" if t_online else "unavailable"
+        t_badge_text = "Ready" if t_online else "Unavailable"
+
+        st.markdown(
+            f"""<div class="status-card">
+    <div class="status-card-left">
+        <div class="status-dot-indicator {t_dot}"></div>
+        <div>
+            <div class="status-card-title">{t_title}</div>
+            <div class="status-card-desc">{t_desc}</div>
+        </div>
+    </div>
+    <span class="status-badge {t_badge_class}">{t_badge_text}</span>
+</div>""",
+            unsafe_allow_html=True,
         )
-        render_status_row(
-            title="Image Retrieval Index",
-            subtitle=f"{image_store.index.ntotal} visual vectors ready" if image_store else "Index offline",
-            is_ready=image_store is not None,
-            ready_label="Ready",
-            unready_label="Unavailable",
+
+        # Card 3: Image Retrieval Index
+        i_online = image_store is not None
+        i_title = "Image Retrieval Index"
+        i_desc = f"Index online (CLIP + YOLO26n - {image_store.index.ntotal} items)" if i_online else "Index offline"
+        i_dot = "green" if i_online else "amber"
+        i_badge_class = "ready" if i_online else "unavailable"
+        i_badge_text = "Ready" if i_online else "Unavailable"
+
+        st.markdown(
+            f"""<div class="status-card">
+    <div class="status-card-left">
+        <div class="status-dot-indicator {i_dot}"></div>
+        <div>
+            <div class="status-card-title">{i_title}</div>
+            <div class="status-card-desc">{i_desc}</div>
+        </div>
+    </div>
+    <span class="status-badge {i_badge_class}">{i_badge_text}</span>
+</div>""",
+            unsafe_allow_html=True,
         )
-    with right:
-        render_status_row(
-            title="Groq LLM Connection",
-            subtitle="API key configured & ready" if get_api_key() else "API key required in settings",
-            is_ready=bool(get_api_key()),
-            ready_label="Connected",
-            unready_label="Missing Key",
+
+    with right_col:
+        # Card 2: Groq LLM Connection
+        g_ready = bool(get_api_key())
+        g_title = "Groq LLM Connection"
+        g_desc = "API key configured & ready" if g_ready else "API key missing"
+        g_dot = "green" if g_ready else "amber"
+        g_badge_class = "connected" if g_ready else "missing"
+        g_badge_text = "Connected" if g_ready else "Unavailable"
+
+        st.markdown(
+            f"""<div class="status-card">
+    <div class="status-card-left">
+        <div class="status-dot-indicator {g_dot}"></div>
+        <div>
+            <div class="status-card-title">{g_title}</div>
+            <div class="status-card-desc">{g_desc}</div>
+        </div>
+    </div>
+    <span class="status-badge {g_badge_class}">{g_badge_text}</span>
+</div>""",
+            unsafe_allow_html=True,
         )
-        render_status_row(
-            title="Dataset State",
-            subtitle=f"{len(active_files)} active document(s) synchronized" if active_files else "Waiting for dataset",
-            is_ready=bool(active_files),
-            ready_label="Dataset Loaded Successfully",
-            unready_label="No Data",
+
+        # Card 4: Dataset State
+        d_count = len(active_files)
+        d_title = "Dataset State"
+        d_desc = f"{d_count} file(s) indexed" if d_count > 0 else "Waiting for dataset"
+        d_dot = "green" if d_count > 0 else "amber"
+        d_badge_class = "active" if d_count > 0 else "nodata"
+        d_badge_text = "Active" if d_count > 0 else "No Data"
+
+        st.markdown(
+            f"""<div class="status-card">
+    <div class="status-card-left">
+        <div class="status-dot-indicator {d_dot}"></div>
+        <div>
+            <div class="status-card-title">{d_title}</div>
+            <div class="status-card-desc">{d_desc}</div>
+        </div>
+    </div>
+    <span class="status-badge {d_badge_class}">{d_badge_text}</span>
+</div>""",
+            unsafe_allow_html=True,
         )
 
 
 # ==============================================================================
-# PAGE 2: DOCUMENTS
+# PAGE 2: DOCUMENTS (EXACT PIXEL-MATCH TO SCREENSHOT)
 # ==============================================================================
 
 elif st.session_state.page == "Documents":
-    render_page_header(
-        badge="Data Management",
-        title="Documents",
-        subtitle="Upload mixed documents and certificates to build unified text and visual searchable FAISS indexes.",
-    )
-
+    st.markdown('<div class="badge-pill">DATA MANAGEMENT</div>', unsafe_allow_html=True)
+    st.markdown("<h1>Documents</h1>", unsafe_allow_html=True)
     st.markdown(
-        """
-        <div style="margin-bottom: 0.85rem; font-size: 0.82rem; color: #94A3B8;">
-            <strong style="color: #F8FAFC;">Supported formats:</strong> PDF, TXT, PNG, JPG, JPEG, WEBP. PDF visual pages are automatically extracted and indexed internally as visual evidence.
-        </div>
-        """,
+        '<div class="page-subtitle">Upload mixed documents and images to build unified text and visual searchable FAISS indexes.</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="format-caption"><strong>Supported formats:</strong> PDF, TXT, PNG, JPG, JPEG, WEBP. PDF visual pages are automatically extracted and indexed internally as visual evidence.</div>',
         unsafe_allow_html=True,
     )
 
     uploaded_files = st.file_uploader(
-        "Drop files here or click to browse",
+        "Upload files",
         accept_multiple_files=True,
         key="document_uploader",
+        label_visibility="collapsed",
     )
 
     if uploaded_files:
-        st.markdown("### Detected Files for Ingestion")
+        st.markdown("<h2>Detected files</h2>", unsafe_allow_html=True)
         for uploaded_file in uploaded_files:
             detected_type = detect_uploaded_file_type(
                 uploaded_file,
                 uploaded_file.getvalue(),
             )
-            render_file_card(
-                name=uploaded_file.name,
-                file_type=detected_type.upper(),
-                is_staged=True,
+            render_file_row(
+                uploaded_file.name,
+                detected_type.upper(),
+                prefix="✓ ",
             )
 
-        if st.button("⚡ Process & Build Multimodal Indexes", type="primary", use_container_width=True):
+        if st.button("Process & Build Indexes", type="primary", use_container_width=True):
             try:
                 process_uploads(uploaded_files)
             except Exception as error:
-                show_error("Processing failed. The previous Active Dataset was retained.", error)
+                show_error("Processing failed. The previous Active Dataset was not replaced.", error)
 
-    st.markdown("### Current Active Dataset")
+    st.markdown("<h2>Current Active Dataset</h2>", unsafe_allow_html=True)
     active_files = st.session_state.active_dataset.get("files", [])
     if not active_files:
-        st.info("No active files have been processed yet. Upload documents above to begin.")
+        st.markdown(
+            '<div class="info-banner">No active files have been processed yet. Upload documents above to begin.</div>',
+            unsafe_allow_html=True,
+        )
     else:
         for file_info in active_files:
-            render_file_card(
-                name=file_info["name"],
-                file_type=file_info["type"],
-                modality=file_info.get("modality", "text"),
-                is_staged=False,
-            )
-        st.caption("ℹ️ Extracted PDF page images serve as internal multimodal evidence and remain traceable to their parent certificate.")
+            render_file_row(file_info["name"], file_info["type"])
+        st.caption("Extracted PDF page images are internal evidence only. They are not separate documents.")
 
 
 # ==============================================================================
-# PAGE 3: ASK RAG (AI RETRIEVAL INTERFACE)
+# PAGE 3: ASK RAG (EXACT PIXEL-MATCH TO SCREENSHOT)
 # ==============================================================================
 
 elif st.session_state.page == "Ask RAG":
-    render_page_header(
-        badge="Multimodal Q&A",
-        title="Ask RAG",
-        subtitle="Certificate-aware question answering powered by adaptive retrieval and strict evidence verification.",
+    st.markdown('<div class="badge-pill">MULTIMODAL Q&A</div>', unsafe_allow_html=True)
+    st.markdown("<h1>Ask RAG</h1>", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="page-subtitle">Multimodal question answering powered by adaptive retrieval, vision grounding, and object verification.</div>',
+        unsafe_allow_html=True,
     )
 
     active_files = st.session_state.active_dataset.get("files", [])
     if not active_files:
-        st.info("Please upload and process a dataset from Documents before querying.")
+        st.markdown(
+            '<div class="info-banner">Please upload and process a dataset from Documents before querying.</div>',
+            unsafe_allow_html=True,
+        )
     else:
         source_names = [file_info["name"] for file_info in active_files]
         selected_source: str | None = None
 
-        # Source Selection Controls
-        s_col1, s_col2 = st.columns([3, 2])
-        with s_col1:
-            if len(source_names) == 1:
-                selected_source = source_names[0]
-                st.markdown(
-                    f"""
-                    <div style="background: #141E33; border: 1px solid #22304A; border-radius: 8px; padding: 0.6rem 0.9rem; font-size: 0.88rem; color: #F8FAFC;">
-                        Active Source: <strong style="color: #60A5FA;">{escape(selected_source)}</strong>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-            else:
-                default_index = 0
-                if st.session_state.selected_source in source_names:
-                    default_index = source_names.index(st.session_state.selected_source)
-
-                search_all = st.session_state.get("search_all_toggle", False)
-                selected_source = st.selectbox(
-                    "Select Target Document",
-                    options=source_names,
-                    index=default_index,
-                    disabled=search_all,
-                    key="source_select",
-                    help="Choose a specific source to strictly isolate retrieval to that document.",
-                )
-                st.session_state.selected_source = selected_source
-
-        with s_col2:
-            search_all = st.checkbox(
-                "Search all active files",
-                value=False,
-                key="search_all_toggle",
-                help="When enabled, queries both text and image indexes across all active documents.",
-            )
-
-        question = st.text_area(
-            "Your Question",
-            placeholder="Ask a specific question about the certificate, issuer, dates, visual logos, or criteria...",
-            height=100,
+        search_all = st.checkbox(
+            "Search all active files",
+            value=False,
+            key="search_all_toggle",
+            help="When enabled, retrieval queries both text and image indexes across all active documents.",
         )
 
-        if st.button("⚡ Run CAR-RAG Query", type="primary", use_container_width=True):
+        st.markdown("<h2>Source</h2>", unsafe_allow_html=True)
+        if len(source_names) == 1:
+            selected_source = source_names[0]
+            st.info(f"Active Document: **{selected_source}**")
+        else:
+            default_index = 0
+            if st.session_state.selected_source in source_names:
+                default_index = source_names.index(st.session_state.selected_source)
+
+            selected_source = st.selectbox(
+                "Select source",
+                options=source_names,
+                index=default_index,
+                disabled=search_all,
+                key="source_select",
+            )
+            st.session_state.selected_source = selected_source
+            st.caption("Choose the original uploaded filename. Extracted PDF visual pages are internal evidence only.")
+
+            if not search_all:
+                st.info(
+                    f"Targeting: **{selected_source}**. Retrieval will strictly isolate evidence to this document."
+                )
+
+        question = st.text_area(
+            "Question",
+            placeholder="Ask a question about your document, text, or image...",
+            height=120,
+        )
+
+        if st.button("⚡ Ask CAR-RAG", type="primary", use_container_width=True):
             if not question.strip():
-                st.warning("Please enter a question to execute retrieval.")
+                st.warning("Please enter a question.")
             else:
                 inferred = match_source_from_question(question, source_names)
                 source_for_query = None if search_all else (selected_source or inferred)
@@ -1746,17 +1847,19 @@ elif st.session_state.page == "Ask RAG":
                     and not source_for_query
                 ):
                     st.warning(
-                        "Multiple certificate documents are available. "
-                        "Please select the specific certificate you want to query."
+                        "Multiple documents are available. "
+                        "Please select the document you want to query."
                     )
                 else:
                     if inferred and not selected_source and not search_all:
-                        st.caption(f"Matched source context from question: **{inferred}**")
+                        st.caption(f"Matched source from the question: **{inferred}**")
 
-                    with st.spinner("Analyzing Query → Multimodal Retrieval → Evidence Verification → Grounded Generation → Answer Verification..."):
+                    with st.spinner(
+                        "Query Analyzer → Retrieval → Evidence Check → Generator → Answer Check"
+                    ):
                         try:
-                            result = run_car_rag(
-                                question=question,
+                            result = run_car_rag_pipeline(
+                                question=question.strip(),
                                 selected_source=source_for_query,
                                 search_all=search_all,
                             )
@@ -1765,213 +1868,232 @@ elif st.session_state.page == "Ask RAG":
                             st.session_state.last_result = None
                             show_error(format_groq_error(error), error)
 
-        # Result Display Area
         result = st.session_state.last_result
         if result is not None:
-            st.markdown("<br>", unsafe_allow_html=True)
-            
-            # Grounded Answer Container
-            grounding_verified = getattr(result, "grounding_verified", False)
-            evidence_sufficient = getattr(result, "evidence_sufficient", False)
-            
-            if grounding_verified:
-                status_pill = '<span class="badge badge-emerald">✓ Verified Grounded</span>'
-            elif not evidence_sufficient:
-                status_pill = '<span class="badge badge-amber">⚠ Insufficient Evidence</span>'
-            else:
-                status_pill = '<span class="badge badge-purple">● Generated</span>'
+            st.divider()
+            st.markdown("<h2>Answer</h2>", unsafe_allow_html=True)
 
-            st.markdown(
-                f"""
-                <div class="answer-card">
-                    <div class="answer-card-header">
-                        <div class="answer-card-title">
-                            <span>⚡</span> Grounded Answer
-                        </div>
-                        <div>{status_pill}</div>
-                    </div>
-                    <div class="answer-body">
-                        {escape(result.answer) if result.answer else "<em>No grounded answer was returned based on the available evidence.</em>"}
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
+            if getattr(result, "error", None):
+                st.error(result.error)
+            elif result.answer:
+                st.write(result.answer)
+            else:
+                st.info("No grounded answer was returned.")
+
+            if not result.evidence_sufficient:
+                st.info("The retrieved evidence was not sufficient for a grounded answer.")
+
+            # Compact Object Detection Evidence (shown only when object detection evidence is actually relevant/used)
+            evidence_list = getattr(result, "evidence", []) or []
+            detection_evidence_items = [
+                item for item in evidence_list if item.source_type == "object_detection"
+            ]
+            is_object_query = (
+                getattr(result.query_analysis, "query_mode", "") == "OBJECT_DETECTION"
+                or getattr(result.query_analysis, "needs_detection_evidence", False)
             )
 
-            # CAR-RAG Pipeline Decision Diagnostics
-            st.markdown("### CAR-RAG Pipeline Decision")
+            if detection_evidence_items:
+                st.markdown("<h2>Object Detection Evidence</h2>", unsafe_allow_html=True)
+                for det_ev in detection_evidence_items:
+                    extra = getattr(det_ev, "extra", {}) or {}
+                    counts = extra.get("detection_counts", {})
+                    if not counts and extra.get("detections"):
+                        counts = dict(Counter(d.get("label", "") for d in extra.get("detections", []) if d.get("label")))
+
+                    if counts:
+                        summary_cols = st.columns(min(4, max(1, len(counts))))
+                        for col, (label, count) in zip(summary_cols, sorted(counts.items())):
+                            emoji = get_object_emoji(label)
+                            col.metric(f"{emoji} {label.title()}", count)
+
+                    detections = extra.get("detections", [])
+                    if detections:
+                        with st.expander(f"▼ Detection Details & Bounding Boxes ({det_ev.document_name})", expanded=False):
+                            for idx, det in enumerate(detections, start=1):
+                                lbl = det.get("label", "object")
+                                conf = float(det.get("confidence", 0.0))
+                                x1 = float(det.get("x1", 0.0))
+                                y1 = float(det.get("y1", 0.0))
+                                x2 = float(det.get("x2", 0.0))
+                                y2 = float(det.get("y2", 0.0))
+                                emoji = get_object_emoji(lbl)
+                                st.write(
+                                    f"**{idx}. {emoji} {lbl.title()}** — "
+                                    f"Confidence: `{conf:.1%}` | "
+                                    f"Bounding Box: `({x1:.1f}, {y1:.1f}, {x2:.1f}, {y2:.1f})`"
+                                )
+                    elif not counts:
+                        st.write("No supported objects were detected in this indexed image.")
+            elif is_object_query:
+                st.markdown("<h2>Object Detection Evidence</h2>", unsafe_allow_html=True)
+                st.write("No supported objects were detected in this indexed image.")
+
+            st.markdown("<h2>CAR-RAG Decision</h2>", unsafe_allow_html=True)
             analysis = result.query_analysis
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Query Type", str(getattr(analysis, "query_type", "unknown")).title())
-            c2.metric("Image Retrieval", "Active" if getattr(analysis, "needs_image_retrieval", False) else "Inactive")
+            c1.metric(
+                "Query Type",
+                str(getattr(analysis, "query_type", "unknown")).title(),
+            )
+            c2.metric(
+                "Image Retrieval",
+                "Yes" if (getattr(analysis, "needs_image_retrieval", False) or any(item.modality == "image" for item in (result.evidence or []))) else "No",
+            )
             c3.metric("Evidence Count", len(result.evidence or []))
             
-            grounding_text = "Verified" if result.grounding_verified else ("Insufficient" if not result.evidence_sufficient else "Unverified")
-            c4.metric("Verification", grounding_text)
+            grounding_label = "Grounded" if result.grounding_verified else ("Insufficient" if not result.evidence_sufficient else "Not Grounded")
+            c4.metric("Grounding", grounding_label)
 
-            # Reasoning Diagnostics
-            with st.expander("🔍 Inspection & Verification Diagnostics", expanded=False):
-                if getattr(result, "evidence_reason", ""):
-                    st.markdown(f"**Evidence Check Evaluation:** {result.evidence_reason}")
-                if getattr(result, "answer_reason", ""):
-                    st.markdown(f"**Answer Check Verification:** {result.answer_reason}")
-                if getattr(result, "re_retrieved", False):
-                    st.markdown("**Adaptive Pipeline:** Re-retrieval was automatically triggered to resolve insufficient initial evidence.")
+            if getattr(result, "evidence_reason", ""):
+                st.caption(f"**Evidence check:** {result.evidence_reason}")
+            if getattr(result, "answer_reason", ""):
+                st.caption(f"**Answer check:** {result.answer_reason}")
+            if getattr(result, "re_retrieved", False):
+                st.caption("Adaptive re-retrieval ran for this question.")
 
-            # Retrieved Evidence Items
             evidence = result.evidence or []
             if evidence:
-                st.markdown("### Retrieved Supporting Evidence")
+                st.markdown("<h2>Retrieved Evidence</h2>", unsafe_allow_html=True)
                 for number, item in enumerate(evidence, start=1):
-                    with st.expander(f"{number}. {item.display_label}  ·  Score: {item.score:.3f}"):
+                    label = item.display_label
+                    if item.source_type == "object_detection":
+                        label = f"🎯 {item.document_name} — YOLO26n Object Detection Evidence"
+
+                    with st.expander(f"{number}. {label}  ·  Score: {item.score:.3f}"):
                         if item.modality == "image":
-                            page_text = f" — Page {item.page_number}" if item.page_number is not None else ""
-                            st.caption(f"**Source Document:** {item.document_name}{page_text} (Visual Modality)")
+                            page_text = f" — page {item.page_number}" if item.page_number is not None else ""
+                            st.caption(f"**Source Document:** {item.document_name}{page_text} (Visual Evidence)")
+                        elif item.source_type == "object_detection":
+                            st.caption(f"**Source Document:** {item.document_name} (YOLO26n Object Detection)")
                         else:
-                            st.caption(f"**Source Document:** {item.document_name} (Text Modality)")
+                            st.caption(f"**Source Document:** {item.document_name} (Text Evidence)")
                         
-                        st.markdown(f'<div class="evidence-snippet">{escape(item.caption or item.text)}</div>', unsafe_allow_html=True)
+                        st.write(item.caption or item.text)
                         if item.image_path and Path(item.image_path).exists():
                             st.image(item.image_path, use_container_width=True)
 
 
 # ==============================================================================
-# PAGE 4: EVIDENCE
+# PAGE 4: EVIDENCE (EXACT PIXEL-MATCH TO SCREENSHOT)
 # ==============================================================================
 
 elif st.session_state.page == "Evidence":
-    render_page_header(
-        badge="Traceability",
-        title="Evidence",
-        subtitle="Inspect retrieved textual passages and visual evidence extracted from the active dataset.",
+    st.markdown('<div class="badge-pill">TRACEABILITY</div>', unsafe_allow_html=True)
+    st.markdown("<h1>Evidence</h1>", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="page-subtitle">Inspect retrieved textual passages and visual evidence extracted from the active dataset.</div>',
+        unsafe_allow_html=True,
     )
 
     result = st.session_state.last_result
     if result is None:
-        st.info("No query result in session. Execute a question on the Ask RAG page to inspect evidence.")
+        st.markdown(
+            '<div class="info-banner">No query result in session. Execute a question on the Ask RAG page to inspect evidence.</div>',
+            unsafe_allow_html=True,
+        )
     else:
         evidence = getattr(result, "evidence", None) or []
         if not evidence:
-            st.warning("No evidence was retrieved for the previous query.")
+            st.warning("No evidence was returned.")
         else:
-            text_evidence = [item for item in evidence if item.modality == "text"]
+            text_evidence = [item for item in evidence if item.modality == "text" and item.source_type != "object_detection"]
             image_evidence = [item for item in evidence if item.modality == "image"]
-            
-            text_tab, image_tab = st.tabs(
-                [f"📄 Text Passages ({len(text_evidence)})", f"🖼️ Visual Evidence ({len(image_evidence)})"]
-            )
+            det_evidence = [item for item in evidence if item.source_type == "object_detection"]
 
-            with text_tab:
+            tab_titles = [f"Text ({len(text_evidence)})", f"Images ({len(image_evidence)})"]
+            if det_evidence:
+                tab_titles.append(f"Detections ({len(det_evidence)})")
+
+            tabs = st.tabs(tab_titles)
+
+            with tabs[0]:
                 if not text_evidence:
-                    st.info("No textual evidence matched this query.")
+                    st.info("No text evidence for this answer.")
                 for item in text_evidence:
-                    st.markdown(
-                        f"""
-                        <div class="evidence-card">
-                            <div class="evidence-header">
-                                <div class="evidence-source">📄 {escape(item.document_name)}</div>
-                                <div class="evidence-score">Cosine Score: {item.score:.3f}</div>
-                            </div>
-                            <div class="evidence-snippet">{escape(item.text)}</div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
+                    st.markdown(f"**{item.document_name}**")
+                    st.caption(f"Score: {item.score:.3f}")
+                    st.write(item.text)
+                    st.divider()
 
-            with image_tab:
+            with tabs[1]:
                 if not image_evidence:
-                    st.info("No visual evidence matched this query.")
+                    st.info("No image evidence for this answer.")
                 for item in image_evidence:
-                    page = f" · Page {item.page_number}" if item.page_number is not None else ""
-                    st.markdown(
-                        f"""
-                        <div class="evidence-card">
-                            <div class="evidence-header">
-                                <div class="evidence-source">🖼️ {escape(item.document_name)}{page}</div>
-                                <div class="evidence-score">Cosine Score: {item.score:.3f} · {escape(item.source_type)}</div>
-                            </div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
+                    page = (
+                        f" · page {item.page_number}"
+                        if item.page_number is not None
+                        else ""
                     )
+                    st.markdown(f"**{item.document_name}**{page}")
+                    st.caption(f"Score: {item.score:.3f} · {item.source_type}")
                     if item.image_path and Path(item.image_path).exists():
                         st.image(item.image_path, use_container_width=True)
                     if item.caption:
-                        st.caption(f"**Visual Caption:** {item.caption}")
+                        st.write(item.caption)
+                    st.divider()
+
+            if len(tabs) > 2 and det_evidence:
+                with tabs[2]:
+                    for item in det_evidence:
+                        st.markdown(f"**🎯 {item.document_name}**")
+                        st.caption(f"Score: {item.score:.3f} · Object Detection")
+                        st.code(item.text, language="text")
+                        if item.image_path and Path(item.image_path).exists():
+                            st.image(item.image_path, use_container_width=True)
+                        st.divider()
 
 
 # ==============================================================================
-# PAGE 5: ARCHITECTURE
+# PAGE 5: ARCHITECTURE (EXACT PIXEL-MATCH TO SCREENSHOT)
 # ==============================================================================
 
 elif st.session_state.page == "Architecture":
-    render_page_header(
-        badge="System Design",
-        title="Architecture",
-        subtitle="Certificate-Aware Multimodal Retrieval-Augmented Generation system workflow.",
-    )
-
+    st.markdown('<div class="badge-pill">SYSTEM DESIGN</div>', unsafe_allow_html=True)
+    st.markdown("<h1>Architecture</h1>", unsafe_allow_html=True)
     st.markdown(
-        """
-        <div class="arch-pipeline">
-            <div style="font-weight: 700; font-size: 1.1rem; color: #F8FAFC; margin-bottom: 0.5rem;">
-                ⚡ End-to-End Multimodal Pipeline
-            </div>
-            <div style="font-size: 0.88rem; color: #94A3B8; margin-bottom: 1rem;">
-                Uploaded certificates and documents remain unified logical entities while generating parallel searchable text chunks and visual page representations.
-            </div>
-            <div class="arch-grid">
-                <div class="arch-box">
-                    <div class="arch-box-icon">📁</div>
-                    <div class="arch-box-title">1. Document Ingestion</div>
-                    <div class="arch-box-desc">
-                        Automatic file type detection (PDF, TXT, PNG, JPG). PDFs undergo text extraction and page visual extraction.
-                    </div>
-                </div>
-                <div class="arch-box">
-                    <div class="arch-box-icon">🧠</div>
-                    <div class="arch-box-title">2. Dual Embeddings</div>
-                    <div class="arch-box-desc">
-                        <strong>Text:</strong> all-MiniLM-L6-v2 (384-dim)<br>
-                        <strong>Visual:</strong> CLIP ViT-B/32 multimodal embeddings.
-                    </div>
-                </div>
-                <div class="arch-box">
-                    <div class="arch-box-icon">🔍</div>
-                    <div class="arch-box-title">3. Multimodal FAISS Index</div>
-                    <div class="arch-box-desc">
-                        Normalized inner-product vector indexing enabling exact cosine similarity retrieval across modalities.
-                    </div>
-                </div>
-                <div class="arch-box">
-                    <div class="arch-box-icon">⚡</div>
-                    <div class="arch-box-title">4. Query Analyzer</div>
-                    <div class="arch-box-desc">
-                        Classifies query intent, identifies certificate targeting, and routes retrieval mode (Text, Image, or Hybrid).
-                    </div>
-                </div>
-                <div class="arch-box">
-                    <div class="arch-box-icon">🛡️</div>
-                    <div class="arch-box-title">5. Evidence & Answer Verification</div>
-                    <div class="arch-box-desc">
-                        Evaluates evidence sufficiency before generation and verifies grounded claims to prevent hallucinations.
-                    </div>
-                </div>
-                <div class="arch-box">
-                    <div class="arch-box-icon">🤖</div>
-                    <div class="arch-box-title">6. Grounded Generator</div>
-                    <div class="arch-box-desc">
-                        High-performance Groq LLM generation strictly constrained to verified source evidence citations.
-                    </div>
-                </div>
-            </div>
-        </div>
-        """,
+        '<div class="page-subtitle">Multimodal Retrieval-Augmented Generation with Vision & YOLO26n Object Detection.</div>',
         unsafe_allow_html=True,
     )
-
-    st.info(
-        "💡 **Key Architectural Decision:** A PDF certificate remains one logical source. Visual pages are extracted internally so retrieval can leverage both textual data and visual evidence (e.g. logos, stamps, signatures) while maintaining strict document provenance."
+    st.markdown(
+        """<div class="arch-pipeline-container">
+    <div class="arch-pipeline-header">⚡ End-to-End Multimodal Pipeline</div>
+    <div class="arch-pipeline-desc">Uploaded documents and images remain unified logical entities while generating parallel searchable text chunks and visual page representations.</div>
+    <div class="arch-grid">
+        <div class="arch-card">
+            <div class="arch-card-icon">📁</div>
+            <div class="arch-card-title">1. Document Ingestion</div>
+            <div class="arch-card-body">Automatic file type detection (PDF, TXT, PNG, JPG, WEBP). PDFs undergo text extraction and page visual extraction.</div>
+        </div>
+        <div class="arch-card">
+            <div class="arch-card-icon">🧠</div>
+            <div class="arch-card-title">2. Dual Embeddings</div>
+            <div class="arch-card-body">Text: all-MiniLM-L6-v2 (384-dim)<br>Visual: CLIP ViT-B/32 multimodal embeddings.</div>
+        </div>
+        <div class="arch-card">
+            <div class="arch-card-icon">🔍</div>
+            <div class="arch-card-title">3. Multimodal FAISS Index</div>
+            <div class="arch-card-body">Normalized inner-product vector indexing enabling exact cosine similarity retrieval across modalities.</div>
+        </div>
+        <div class="arch-card">
+            <div class="arch-card-icon">⚡</div>
+            <div class="arch-card-title">4. Query Analyzer</div>
+            <div class="arch-card-body">Classifies query intent, identifies targeting, and routes retrieval mode (Text, Image, or Hybrid).</div>
+        </div>
+        <div class="arch-card">
+            <div class="arch-card-icon">🛡</div>
+            <div class="arch-card-title">5. Evidence & Answer Verification</div>
+            <div class="arch-card-body">Evaluates evidence sufficiency before generation and verifies grounded claims to prevent hallucinations.</div>
+        </div>
+        <div class="arch-card">
+            <div class="arch-card-icon">💬</div>
+            <div class="arch-card-title">6. Grounded Generator</div>
+            <div class="arch-card-body">High-performance Groq LLM generation strictly constrained to verified source evidence citations.</div>
+        </div>
+    </div>
+</div>
+<div class="arch-decision-box">💡 <strong>Key Architectural Decision:</strong> Multi-page PDFs and documents remain unified logical entities. Visual pages and images are indexed internally so retrieval can leverage both textual data and visual evidence (e.g. diagrams, charts, stamps, objects) while maintaining strict document provenance.</div>""",
+        unsafe_allow_html=True,
     )
 
 
@@ -1980,10 +2102,11 @@ elif st.session_state.page == "Architecture":
 # ==============================================================================
 
 elif st.session_state.page == "Status":
-    render_page_header(
-        badge="Diagnostics",
-        title="System Status",
-        subtitle="Operational metrics, model connectivity, and index readiness.",
+    st.markdown('<div class="badge-pill">DIAGNOSTICS</div>', unsafe_allow_html=True)
+    st.markdown("<h1>Status</h1>", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="page-subtitle">Real-time health status of local vector indices, embedding models, and LLM connections.</div>',
+        unsafe_allow_html=True,
     )
 
     text_store = load_text_store()
@@ -1992,47 +2115,92 @@ elif st.session_state.page == "Status":
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Active Files", len(active_files))
-    c2.metric("Text Chunks", text_store.index.ntotal if text_store else 0)
-    c3.metric("Image Vectors", image_store.index.ntotal if image_store else 0)
+    c2.metric("Text chunks", text_store.index.ntotal if text_store else 0)
+    c3.metric("Image items", image_store.index.ntotal if image_store else 0)
 
-    st.markdown("### Component Health")
+    st.markdown("<h2>Component Health</h2>", unsafe_allow_html=True)
+    left_col, right_col = st.columns(2)
 
-    render_status_row(
-        title="Text Retrieval Store",
-        subtitle=f"{text_store.index.ntotal} searchable text chunks in FAISS" if text_store else "Index not loaded",
-        is_ready=text_store is not None,
-        ready_label="Online",
-        unready_label="Offline",
-    )
+    with left_col:
+        t_online = text_store is not None
+        t_desc = f"{text_store.index.ntotal} searchable chunks" if t_online else "Text index unavailable"
+        t_dot = "green" if t_online else "amber"
+        t_badge_class = "ready" if t_online else "unavailable"
+        t_badge_text = "Ready" if t_online else "Unavailable"
 
-    render_status_row(
-        title="Visual Retrieval Store",
-        subtitle=f"{image_store.index.ntotal} visual feature vectors in FAISS" if image_store else "Index not loaded",
-        is_ready=image_store is not None,
-        ready_label="Online",
-        unready_label="Offline",
-    )
+        st.markdown(
+            f"""<div class="status-card">
+    <div class="status-card-left">
+        <div class="status-dot-indicator {t_dot}"></div>
+        <div>
+            <div class="status-card-title">Dense Text FAISS Index</div>
+            <div class="status-card-desc">{t_desc}</div>
+        </div>
+    </div>
+    <span class="status-badge {t_badge_class}">{t_badge_text}</span>
+</div>""",
+            unsafe_allow_html=True,
+        )
 
-    render_status_row(
-        title="Embeddings Pipeline",
-        subtitle="SentenceTransformers (MiniLM) + CLIP ViT-B/32",
-        is_ready=True,
-        ready_label="Active",
-        unready_label="Inactive",
-    )
+        i_online = image_store is not None
+        i_desc = f"{image_store.index.ntotal} searchable visual vectors" if i_online else "Visual index unavailable"
+        i_dot = "green" if i_online else "amber"
+        i_badge_class = "ready" if i_online else "unavailable"
+        i_badge_text = "Ready" if i_online else "Unavailable"
 
-    render_status_row(
-        title="Groq LLM Service",
-        subtitle="OpenAI-compatible inference runtime" if get_api_key() else "GROQ_API_KEY environment variable missing",
-        is_ready=bool(get_api_key()),
-        ready_label="Connected",
-        unready_label="Missing Key",
-    )
+        st.markdown(
+            f"""<div class="status-card">
+    <div class="status-card-left">
+        <div class="status-dot-indicator {i_dot}"></div>
+        <div>
+            <div class="status-card-title">Dense Image CLIP FAISS Index</div>
+            <div class="status-card-desc">{i_desc}</div>
+        </div>
+    </div>
+    <span class="status-badge {i_badge_class}">{i_badge_text}</span>
+</div>""",
+            unsafe_allow_html=True,
+        )
+
+    with right_col:
+        st.markdown(
+            """<div class="status-card">
+    <div class="status-card-left">
+        <div class="status-dot-indicator green"></div>
+        <div>
+            <div class="status-card-title">YOLO26n Object Detector</div>
+            <div class="status-card-desc">Ultralytics YOLO26n Ready</div>
+        </div>
+    </div>
+    <span class="status-badge ready">Ready</span>
+</div>""",
+            unsafe_allow_html=True,
+        )
+
+        g_ready = bool(get_api_key())
+        g_desc = "Connected (openai/gpt-oss-120b & qwen/qwen3.8-27b)" if g_ready else "GROQ_API_KEY is not configured"
+        g_dot = "green" if g_ready else "amber"
+        g_badge_class = "connected" if g_ready else "missing"
+        g_badge_text = "Connected" if g_ready else "Missing"
+
+        st.markdown(
+            f"""<div class="status-card">
+    <div class="status-card-left">
+        <div class="status-dot-indicator {g_dot}"></div>
+        <div>
+            <div class="status-card-title">Groq LLM Engine</div>
+            <div class="status-card-desc">{g_desc}</div>
+        </div>
+    </div>
+    <span class="status-badge {g_badge_class}">{g_badge_text}</span>
+</div>""",
+            unsafe_allow_html=True,
+        )
 
     if active_files:
-        st.markdown("### Loaded Documents")
+        st.markdown("<h2>Active files</h2>", unsafe_allow_html=True)
         for file_info in active_files:
-            render_file_card(file_info["name"], file_info["type"], is_staged=False)
+            render_file_row(file_info["name"], file_info["type"])
 
 
 # ==============================================================================
@@ -2040,62 +2208,34 @@ elif st.session_state.page == "Status":
 # ==============================================================================
 
 elif st.session_state.page == "Settings":
-    render_page_header(
-        badge="Configuration",
-        title="Settings",
-        subtitle="Configure retrieval parameters, default search modes, and diagnostic logging.",
+    st.markdown('<div class="badge-pill">CONFIGURATION</div>', unsafe_allow_html=True)
+    st.markdown("<h1>Settings</h1>", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="page-subtitle">Configure retrieval depth, default modality selection, and technical diagnostics.</div>',
+        unsafe_allow_html=True,
     )
-
-    st.markdown("### Retrieval Parameters")
 
     st.session_state.settings["top_k"] = st.slider(
         "Retrieval Top-K",
         min_value=1,
         max_value=15,
         value=int(st.session_state.settings.get("top_k", 5)),
-        help="Number of items to retrieve from each internal index before source filtering.",
+        help="How many items to retrieve from each internal index before source filtering.",
     )
-
     st.session_state.settings["retrieval_mode"] = st.selectbox(
         "Default Retrieval Mode",
         options=["both", "text", "image"],
         index=["both", "text", "image"].index(
             st.session_state.settings.get("retrieval_mode", "both")
         ),
-        help="Fallback mode when source type is unspecified. PDFs automatically search both text and visual indices.",
+        help="Used when a source type is unknown. Search all active files uses every available index in the Active Dataset. A selected PDF always uses both text and visual retrieval.",
     )
-
-    st.markdown("### Diagnostics & Logging")
     st.session_state.settings["show_debug"] = st.checkbox(
         "Show technical error details",
         value=bool(st.session_state.settings.get("show_debug", False)),
-        help="Enable detailed stack traces and Groq raw error payloads.",
     )
-
-    st.markdown("### Active Model Configuration")
-    st.markdown(
-        """
-        <div class="status-card">
-            <div>
-                <div class="status-card-title">LLM Reasoning & Generation</div>
-                <div class="status-card-subtitle">openai/gpt-oss-120b (via Groq)</div>
-            </div>
-            <div><span class="badge badge-blue">Reasoning</span></div>
-        </div>
-        <div class="status-card">
-            <div>
-                <div class="status-card-title">Vision & Grounding Verifier</div>
-                <div class="status-card-subtitle">qwen/qwen3.8-27b (via Groq)</div>
-            </div>
-            <div><span class="badge badge-purple">Multimodal Vision</span></div>
-        </div>
-        <div class="status-card">
-            <div>
-                <div class="status-card-title">Dense Embeddings</div>
-                <div class="status-card-subtitle">all-MiniLM-L6-v2 + CLIP ViT-B/32</div>
-            </div>
-            <div><span class="badge badge-emerald">Local Embeddings</span></div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    st.info(
+        "Selecting a PDF document automatically uses both text and visual retrieval. "
+        "Standalone images use image retrieval. TXT files use text retrieval."
     )
+    st.caption("Models: text reasoning uses openai/gpt-oss-120b. Vision and judging use qwen/qwen3.8-27b.")

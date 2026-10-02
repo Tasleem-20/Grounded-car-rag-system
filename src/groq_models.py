@@ -37,8 +37,8 @@ def groq_client(api_key: str | None = None) -> Groq:
     if not key:
         raise RuntimeError("GROQ_API_KEY is not configured.")
 
-    timeout = httpx.Timeout(60.0, connect=15.0, read=60.0, write=60.0)
-    return Groq(api_key=key, timeout=timeout, max_retries=2)
+    timeout = httpx.Timeout(45.0, connect=10.0, read=45.0, write=45.0)
+    return Groq(api_key=key, timeout=timeout, max_retries=0)
 
 
 def is_rate_limit_error(error: BaseException) -> bool:
@@ -179,7 +179,7 @@ class GroqModelService:
         if not self.api_key:
             raise RuntimeError("GROQ_API_KEY is not configured.")
 
-        self.client = Groq(api_key=self.api_key)
+        self.client = Groq(api_key=self.api_key, max_retries=0)
 
     def generate(
         self,

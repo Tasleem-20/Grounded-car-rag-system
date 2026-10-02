@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import faiss
 import numpy as np
@@ -13,7 +14,7 @@ from src.evidence import RetrievedEvidence
 from src.vector_store import VectorStoreError
 
 
-IMAGE_METADATA_VERSION = 1
+IMAGE_METADATA_VERSION = 2
 
 
 @dataclass
@@ -30,6 +31,11 @@ class ImageRecord:
     source_type: str
     width: int
     height: int
+    ocr_text: str = ""
+    detections: list[dict[str, Any]] = field(default_factory=list)
+    detection_summary: str = ""
+    detection_counts: dict[str, int] = field(default_factory=dict)
+    detection_context: str = ""
 
     def to_metadata(self) -> dict:
         return {
@@ -40,9 +46,14 @@ class ImageRecord:
             "image_path": self.image_path,
             "page_number": self.page_number,
             "caption": self.caption,
+            "ocr_text": self.ocr_text,
             "source_type": self.source_type,
             "width": self.width,
             "height": self.height,
+            "detections": self.detections,
+            "detection_summary": self.detection_summary,
+            "detection_counts": self.detection_counts,
+            "detection_context": self.detection_context,
         }
 
     @classmethod
@@ -56,24 +67,148 @@ class ImageRecord:
             image_path=str(metadata["image_path"]),
             page_number=int(page) if page is not None else None,
             caption=str(metadata.get("caption", "")),
+            ocr_text=str(metadata.get("ocr_text", "")),
             source_type=str(metadata.get("source_type", "standalone_image")),
             width=int(metadata.get("width", 0)),
             height=int(metadata.get("height", 0)),
+            detections=list(metadata.get("detections", [])),
+            detection_summary=str(metadata.get("detection_summary", "")),
+            detection_counts=dict(metadata.get("detection_counts", {})),
+            detection_context=str(metadata.get("detection_context", "")),
         )
 
+    def ensure_ocr(self) -> None:
+        """If OCR text is not present but image file exists, run OCR and populate."""
+        if not self.ocr_text:
+            path = Path(self.image_path)
+            if not path.is_file():
+                candidates = [
+                    Path(self.image_path),
+                    Path("data") / "images" / path.name,
+                    Path("data") / path.name,
+                    Path("data") / "images_staging" / path.name,
+                ]
+                for cand in candidates:
+                    if cand.is_file():
+                        path = cand
+                        self.image_path = str(cand)
+                        break
+
+            if path.is_file():
+                try:
+                    from src.ocr import extract_ocr_text
+                    self.ocr_text = extract_ocr_text(path)
+                except Exception:
+                    pass
+
+    def ensure_detections(self) -> None:
+        """If detections are not present but image file exists, run YOLO26n and populate."""
+        if not self.detections and not self.detection_context:
+            path = Path(self.image_path)
+            if not path.is_file():
+                candidates = [
+                    Path(self.image_path),
+                    Path("data") / "images" / path.name,
+                    Path("data") / path.name,
+                    Path("data") / "images_staging" / path.name,
+                ]
+                for cand in candidates:
+                    if cand.is_file():
+                        path = cand
+                        self.image_path = str(cand)
+                        break
+
+            if path.is_file():
+                try:
+                    from src.object_detection import ObjectDetector
+                    detector = ObjectDetector(model_name="yolo26n.pt")
+                    det_res = detector.detect(path)
+                    self.detections = [d.to_dict() for d in det_res.detections]
+                    self.detection_summary = det_res.summary
+                    self.detection_counts = det_res.counts
+                    self.detection_context = det_res.rag_context
+                except Exception:
+                    pass
+
     def to_evidence(self, score: float) -> RetrievedEvidence:
-        caption = self.caption.strip() or f"Image from {self.document_name}"
+        self.ensure_ocr()
+        self.ensure_detections()
+        caption = self.caption.strip()
+        ocr_text = self.ocr_text.strip()
+
+        evidence_parts = []
+        if caption and "Caption unavailable" not in caption:
+            evidence_parts.append(f"Visual Description: {caption}")
+        if ocr_text:
+            evidence_parts.append(f"Visible Text (OCR):\n{ocr_text}")
+        elif caption:
+            evidence_parts.append(caption)
+        else:
+            evidence_parts.append(f"Image from {self.document_name}")
+
+        full_text = "\n\n".join(evidence_parts)
+
         return RetrievedEvidence(
             modality="image",
             document_name=self.document_name,
             score=float(score),
-            text=caption,
+            text=full_text,
             source_type=self.source_type,
             image_id=self.image_id,
             image_path=self.image_path,
             page_number=self.page_number,
-            caption=caption,
+            caption=caption or ocr_text or f"Image from {self.document_name}",
             source_filename=self.source_filename,
+            extra={
+                "ocr_text": self.ocr_text,
+                "caption": self.caption,
+                "detections": self.detections,
+                "detection_summary": self.detection_summary,
+                "detection_counts": self.detection_counts,
+                "detection_context": self.detection_context,
+            },
+        )
+
+    def to_detection_evidence(self, score: float = 1.0) -> RetrievedEvidence:
+        self.ensure_detections()
+        text_context = self.detection_context
+        if not text_context:
+            if self.detections:
+                lines = ["OBJECT DETECTION EVIDENCE", self.detection_summary]
+                for idx, d in enumerate(self.detections, start=1):
+                    lbl = d.get("label", "object")
+                    conf = float(d.get("confidence", 0.0))
+                    x1 = float(d.get("x1", 0.0))
+                    y1 = float(d.get("y1", 0.0))
+                    x2 = float(d.get("x2", 0.0))
+                    y2 = float(d.get("y2", 0.0))
+                    lines.append(f"{idx}. {lbl} | confidence={conf:.3f} | bbox=({x1:.1f},{y1:.1f},{x2:.1f},{y2:.1f})")
+                text_context = "\n".join(lines)
+            else:
+                text_context = (
+                    f"OBJECT DETECTION EVIDENCE\n"
+                    f"Source: {self.document_name}\n"
+                    f"No objects were detected above the confidence threshold."
+                )
+
+        return RetrievedEvidence(
+            modality="text",
+            document_name=self.document_name,
+            score=float(score),
+            text=text_context,
+            source_type="object_detection",
+            image_id=self.image_id,
+            image_path=self.image_path,
+            page_number=self.page_number,
+            caption=self.detection_summary or self.caption,
+            source_filename=self.source_filename,
+            extra={
+                "ocr_text": self.ocr_text,
+                "detections": self.detections,
+                "detection_summary": self.detection_summary,
+                "detection_counts": self.detection_counts,
+                "detection_context": text_context,
+            },
         )
 
 
@@ -146,7 +281,25 @@ class ImageStore:
 
         if index.ntotal != len(records):
             raise VectorStoreError("The saved image index and metadata are out of sync.")
-        return cls(index=index, records=records)
+
+        dirty = False
+        for record in records:
+            if not record.ocr_text:
+                record.ensure_ocr()
+                if record.ocr_text:
+                    dirty = True
+            if not record.detections or not record.detection_context:
+                record.ensure_detections()
+                dirty = True
+
+        store = cls(index=index, records=records)
+        if dirty or payload.get("version", 1) < IMAGE_METADATA_VERSION:
+            try:
+                store.save(index_path, metadata_path)
+            except Exception:
+                pass
+
+        return store
 
     def search(
         self,
