@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from PIL import Image
+
+logger = logging.getLogger("yolo_detector")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
 try:
     from ultralytics import YOLO
@@ -16,7 +21,8 @@ except ImportError:
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MODEL = str(PROJECT_ROOT / "yolo26n.pt")
+YOLO_MODEL_PATH = PROJECT_ROOT / "yolo26n.pt"
+DEFAULT_MODEL = str(YOLO_MODEL_PATH)
 
 
 class ObjectDetectionError(Exception):
@@ -112,7 +118,7 @@ class DetectionResult:
 
 
 class ObjectDetector:
-    """Reusable YOLO inference service."""
+    """Reusable YOLO inference service with CPU execution and full diagnostics."""
 
     def __init__(
         self,
@@ -138,11 +144,20 @@ class ObjectDetector:
         else:
             self.model_name = str(model_path.resolve())
 
+        model_file = Path(self.model_name)
+        file_size = model_file.stat().st_size if model_file.is_file() else 0
+        logger.info("YOLO MODEL PATH: %s", self.model_name)
+        logger.info("YOLO MODEL EXISTS: %s (size: %d bytes)", model_file.is_file(), file_size)
+
         self.confidence = confidence
 
         try:
-            self.model = YOLO(self.model_name)
+            try:
+                self.model = YOLO(self.model_name, task="detect")
+            except TypeError:
+                self.model = YOLO(self.model_name)
         except Exception as error:
+            logger.error("Could not load YOLO model '%s': %s", self.model_name, error, exc_info=True)
             raise ObjectDetectionError(
                 f"Could not load YOLO model '{self.model_name}': {error}"
             ) from error
@@ -157,9 +172,33 @@ class ObjectDetector:
         path = Path(image_path)
 
         if not path.is_file():
-            raise ObjectDetectionError(
-                f"Image file not found: {path}"
-            )
+            candidates = [
+                PROJECT_ROOT / path,
+                PROJECT_ROOT / "data" / "images" / path.name,
+                PROJECT_ROOT / "data" / path.name,
+                Path("data") / "images" / path.name,
+                Path("data") / path.name,
+            ]
+            for cand in candidates:
+                if cand.is_file():
+                    path = cand
+                    break
+
+        if not path.is_file():
+            logger.error("Image file not found: %s", image_path)
+            raise ObjectDetectionError(f"Image file not found: {image_path}")
+
+        # Verify actual image content with PIL
+        try:
+            with Image.open(path) as img:
+                img_format = img.format
+                img_size = img.size
+                img_mode = img.mode
+                logger.info("IMAGE PATH: %s", path)
+                logger.info("IMAGE EXISTS: True")
+                logger.info("IMAGE FORMAT: %s, SIZE: %s, MODE: %s", img_format, img_size, img_mode)
+        except Exception as img_err:
+            logger.warning("Could not read PIL image metadata for %s: %s", path, img_err)
 
         conf = float(
             confidence
@@ -167,19 +206,27 @@ class ObjectDetector:
             else self.confidence
         )
 
+        logger.info("YOLO TASK: detect")
+        logger.info("YOLO CONFIDENCE: %.3f", conf)
+        logger.info("YOLO DEVICE: cpu")
+
         try:
             results = self.model.predict(
                 source=str(path),
                 conf=conf,
                 imgsz=image_size,
+                device="cpu",
+                workers=0,
                 verbose=False,
             )
         except Exception as error:
+            logger.error("YOLO inference failed on %s: %s", path, error, exc_info=True)
             raise ObjectDetectionError(
                 f"YOLO inference failed: {error}"
             ) from error
 
         if not results:
+            logger.error("YOLO returned empty results list for %s", path)
             raise ObjectDetectionError(
                 "YOLO returned no result."
             )
@@ -188,6 +235,28 @@ class ObjectDetector:
 
         names = getattr(result, "names", {}) or {}
         boxes = getattr(result, "boxes", None)
+
+        raw_box_count = len(boxes) if boxes is not None else 0
+        logger.info("YOLO CLASSES: %s", list(names.values()) if isinstance(names, dict) else names)
+        logger.info("RAW BOX COUNT: %d (at conf=%.2f)", raw_box_count, conf)
+
+        # Diagnostic comparison for confidence threshold
+        try:
+            if abs(conf - 0.25) < 1e-4:
+                diag_results = self.model.predict(
+                    source=str(path),
+                    conf=0.10,
+                    imgsz=image_size,
+                    device="cpu",
+                    workers=0,
+                    verbose=False,
+                )
+                diag_boxes = getattr(diag_results[0], "boxes", None) if diag_results else None
+                diag_count = len(diag_boxes) if diag_boxes is not None else 0
+                logger.info("YOLO BOX COUNT @0.25: %d", raw_box_count)
+                logger.info("YOLO BOX COUNT @0.10: %d", diag_count)
+        except Exception as diag_err:
+            logger.debug("Diagnostic confidence check failed: %s", diag_err)
 
         detections: list[Detection] = []
 
@@ -223,6 +292,7 @@ class ObjectDetector:
             )
 
         except Exception as error:
+            logger.error("Could not render detection plot for %s: %s", path, error)
             raise ObjectDetectionError(
                 f"Could not render detection result: {error}"
             ) from error

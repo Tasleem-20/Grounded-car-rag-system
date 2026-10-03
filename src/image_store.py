@@ -113,7 +113,7 @@ class ImageRecord:
 
     def ensure_detections(self) -> None:
         """If detections are not present but image file exists, run YOLO26n and populate."""
-        if not self.detections and not self.detection_context and not self.detection_error:
+        if not self.detections or self.detection_error:
             path = Path(self.image_path)
             if not path.is_file():
                 candidates = [
